@@ -25,7 +25,7 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const PORT = parseInt(process.env.PORT || '3030', 10);
 const POLL_INTERVAL_SEC = parseInt(process.env.POLL_INTERVAL_SEC || '60', 10);
 const POLL_FAST_SEC = parseInt(process.env.POLL_FAST_SEC || '5', 10);
-const ANNOUNCE_AHEAD_MIN = parseInt(process.env.ANNOUNCE_AHEAD_MIN || '5', 10);
+const ANNOUNCE_AHEAD_MIN = parseInt(process.env.ANNOUNCE_AHEAD_MIN || '15', 10);
 const TE_API_KEY = process.env.TE_API_KEY || 'guest:guest';
 
 // Autenticação: se AUTH_USER e AUTH_PASS estiverem definidos no .env,
@@ -187,6 +187,30 @@ app.get('/api/events/upcoming', (req, res) => {
   const now = new Date();
   const end = new Date(now.getTime() + 48 * 60 * 60 * 1000);
   res.json(eventsInRange(now.toISOString(), end.toISOString()));
+});
+
+// Endpoint flexível com parâmetro range=today|tomorrow|week
+app.get('/api/events', (req, res) => {
+  const range = (req.query.range || 'week').toLowerCase();
+  const now = new Date();
+  let start, end;
+
+  if (range === 'today') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  } else if (range === 'tomorrow') {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  } else if (range === 'week') {
+    // Próximos 7 dias a partir de agora
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+  } else {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    end = new Date(start.getTime() + 48 * 60 * 60 * 1000);
+  }
+
+  res.json(eventsInRange(start.toISOString(), end.toISOString()));
 });
 
 app.post('/api/poll', async (req, res) => {

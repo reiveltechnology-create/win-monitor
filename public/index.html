@@ -135,6 +135,34 @@
     margin-left: auto; color: var(--text-dim); font-size: 10px;
   }
 
+  /* ============ RANGE FILTER ============ */
+  .range-filter {
+    display: flex; gap: 0;
+    margin-left: 16px;
+    border: 1px solid var(--line-bright);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .range-filter button {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 4px 12px;
+    cursor: pointer;
+    border-right: 1px solid var(--line-bright);
+    transition: all 0.15s;
+  }
+  .range-filter button:last-child { border-right: none; }
+  .range-filter button:hover { color: var(--text); background: var(--bg-elev-2); }
+  .range-filter button.active {
+    background: var(--green);
+    color: var(--bg);
+    font-weight: 700;
+  }
+
   /* ============ EVENT CARD ============ */
   .event {
     background: var(--bg-elev);
@@ -344,6 +372,37 @@
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--line-bright); }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-mute); }
+
+  /* ============ SELETOR DE PERÍODO ============ */
+  .period-tabs {
+    display: flex; gap: 0; padding: 0;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-elev);
+  }
+  .period-tab {
+    padding: 10px 22px;
+    font-family: inherit; font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase;
+    background: transparent; border: none;
+    color: var(--text-mute);
+    cursor: pointer;
+    border-right: 1px solid var(--line);
+    transition: all 0.15s;
+    position: relative;
+  }
+  .period-tab:hover { color: var(--text); background: var(--bg-elev-2); }
+  .period-tab.active {
+    color: var(--green);
+    background: var(--bg);
+  }
+  .period-tab.active::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -1px;
+    height: 2px; background: var(--green);
+  }
+  .period-tab .count {
+    margin-left: 8px; color: var(--text-mute); font-weight: 700;
+  }
+  .period-tab.active .count { color: var(--green); }
 </style>
 </head>
 <body>
@@ -393,7 +452,12 @@
 <main>
   <section class="panel">
     <div class="panel-title">
-      Agenda (48h)
+      Agenda
+      <div class="range-filter" id="rangeFilter">
+        <button data-range="today">HOJE</button>
+        <button data-range="tomorrow">AMANHÃ</button>
+        <button data-range="week" class="active">SEMANA</button>
+      </div>
       <span class="count" id="eventsCount">0</span>
     </div>
     <div id="eventsList"></div>
@@ -446,6 +510,19 @@
     </div>
 
     <div class="field-group">
+      <label for="cfgAnnounceAhead">Antecedência do aviso (antes do evento)</label>
+      <select id="cfgAnnounceAhead">
+        <option value="30">30 segundos</option>
+        <option value="60">1 minuto</option>
+        <option value="120">2 minutos</option>
+        <option value="180">3 minutos</option>
+        <option value="300">5 minutos</option>
+        <option value="600">10 minutos</option>
+        <option value="900">15 minutos</option>
+      </select>
+    </div>
+
+    <div class="field-group">
       <label for="cfgAlertSound">Som de alerta (antes da fala)</label>
       <select id="cfgAlertSound">
         <option value="none">Nenhum</option>
@@ -476,16 +553,19 @@
     events: [],
     voiceOn: false,
     sse: null,
-    logEntries: []
+    logEntries: [],
+    range: 'week'   // 'today' | 'tomorrow' | 'week'
   };
 
   // ============ CONFIGURAÇÕES PERSISTENTES ============
   const DEFAULT_SETTINGS = {
-    voiceURI: '',       // será preenchido com primeira pt-BR disponível
-    rate: 1.0,
-    pitch: 1.0,
-    volume: 1.0,
-    alertSound: 'ding'
+    voiceURI: '',                 // voz escolhida (será preenchida com 1ª pt-BR)
+    rate: 1.0,                    // velocidade da fala
+    pitch: 1.0,                   // tom (grave/agudo)
+    volume: 1.0,                  // volume 0-1
+    alertSound: 'ding',           // som antes da fala
+    announceAheadSec: 300,        // segundos antes do evento pra avisar (default 5 min)
+    soundToVoiceDelayMs: null     // ms entre som e voz (null = auto, baseado no som)
   };
 
   function loadSettings() {
@@ -503,6 +583,14 @@
   }
 
   state.settings = loadSettings();
+
+  // Carrega range salvo no localStorage
+  try {
+    const savedRange = localStorage.getItem('winMonitorRange');
+    if (savedRange && ['today', 'tomorrow', 'week'].includes(savedRange)) {
+      state.range = savedRange;
+    }
+  } catch (_) {}
 
   // ============ VOZ (Web Speech API) ============
   const synth = window.speechSynthesis;
@@ -649,6 +737,7 @@
     document.getElementById('cfgVolume').value = state.settings.volume;
     document.getElementById('cfgVolumeVal').textContent = Math.round(state.settings.volume * 100) + '%';
     document.getElementById('cfgAlertSound').value = state.settings.alertSound;
+    document.getElementById('cfgAnnounceAhead').value = String(state.settings.announceAheadSec || 300);
     settingsModal.classList.add('open');
   });
 
@@ -687,7 +776,8 @@
       rate: parseFloat(document.getElementById('cfgRate').value),
       pitch: parseFloat(document.getElementById('cfgPitch').value),
       volume: parseFloat(document.getElementById('cfgVolume').value),
-      alertSound: document.getElementById('cfgAlertSound').value
+      alertSound: document.getElementById('cfgAlertSound').value,
+      announceAheadSec: parseInt(document.getElementById('cfgAnnounceAhead').value, 10) || 300
     };
     const oldSettings = state.settings;
     const oldVoice = chosenVoice;
@@ -713,12 +803,18 @@
       rate: parseFloat(document.getElementById('cfgRate').value),
       pitch: parseFloat(document.getElementById('cfgPitch').value),
       volume: parseFloat(document.getElementById('cfgVolume').value),
-      alertSound: document.getElementById('cfgAlertSound').value
+      alertSound: document.getElementById('cfgAlertSound').value,
+      announceAheadSec: parseInt(document.getElementById('cfgAnnounceAhead').value, 10) || 300
     };
     chosenVoice = availableVoices.find(v => v.voiceURI === state.settings.voiceURI) || chosenVoice;
     saveSettings(state.settings);
     settingsModal.classList.remove('open');
-    logEvent('SYS', 'Configurações de voz salvas');
+    // Limpa avisos já agendados pra reagendar com a nova antecedência
+    state.spokenUpcoming = new Set();
+    scheduleClientAnnouncements();
+    const aheadSec = state.settings.announceAheadSec;
+    const aheadLabel = aheadSec < 60 ? `${aheadSec}s` : `${aheadSec / 60}min`;
+    logEvent('SYS', `Configurações salvas (aviso ${aheadLabel} antes)`);
   });
 
   document.getElementById('voiceBtn').addEventListener('click', () => {
@@ -747,9 +843,19 @@
   // ============ FORMATADORES DE FALA ============
   function speakUpcoming(ev) {
     const country = ev.country === 'BR' ? 'Brasil' : 'Estados Unidos';
-    const mins = ev.minutesUntil || 5;
-    speak(`Atenção. ${ev.event}. ${country}. Em ${mins} minutos.`);
-    logEvent('UPCOMING', `${ev.country} ${ev.event} em ${mins}min`);
+    // Usa secondsUntil se fornecido, senão converte minutesUntil pra segundos.
+    const secs = ev.secondsUntil != null ? ev.secondsUntil
+               : (ev.minutesUntil != null ? ev.minutesUntil * 60 : 300);
+
+    let whenLabel;
+    if (secs < 90) {
+      whenLabel = `em ${secs} segundos`;
+    } else {
+      const mins = Math.round(secs / 60);
+      whenLabel = mins === 1 ? 'em 1 minuto' : `em ${mins} minutos`;
+    }
+    speak(`Atenção. ${ev.event}. ${country}. ${whenLabel}.`);
+    logEvent('UPCOMING', `${ev.country} ${ev.event} (${whenLabel})`);
   }
 
   function speakRelease(ev) {
@@ -906,20 +1012,81 @@
     `).join('');
   }
 
+  // ============ AGENDAMENTO LOCAL DE AVISOS ============
+  // O servidor manda avisos baseado em ANNOUNCE_AHEAD_MIN (default 5min).
+  // Mas o operador pode preferir 1min, 30s, 10min... Então o NAVEGADOR
+  // também agenda seus próprios avisos baseado em state.settings.announceAheadSec.
+  // Usamos um Set pra não falar duas vezes do mesmo evento.
+  state.spokenUpcoming = new Set();
+  state.spokenRelease = new Set();
+
+  function scheduleClientAnnouncements() {
+    const now = Date.now();
+    const aheadMs = (state.settings.announceAheadSec || 300) * 1000;
+
+    for (const ev of state.events) {
+      if (ev.released) continue;
+      if (state.spokenUpcoming.has(ev.id)) continue;
+      const evTime = new Date(ev.datetime).getTime();
+      const triggerTime = evTime - aheadMs;
+      const delay = triggerTime - now;
+
+      // Já passou o momento de avisar? Pula.
+      if (delay < -10000) continue;
+      // Estamos dentro da janela de aviso (entre trigger time e hora do evento)
+      if (delay <= 0 && evTime > now) {
+        state.spokenUpcoming.add(ev.id);
+        const secsUntil = Math.max(5, Math.round((evTime - now) / 1000));
+        speakUpcoming({ ...ev, secondsUntil: secsUntil });
+        continue;
+      }
+      // Agendar pra falar no momento certo
+      if (delay > 0 && delay < 24 * 60 * 60 * 1000) {
+        state.spokenUpcoming.add(ev.id);
+        const secsAhead = Math.round(aheadMs / 1000);
+        setTimeout(() => {
+          speakUpcoming({ ...ev, secondsUntil: secsAhead });
+        }, delay);
+      }
+    }
+  }
+
   // ============ FETCH ============
   async function loadEvents() {
     try {
-      // Usa /upcoming pra incluir próximas 48h (hoje + amanhã)
-      // — operador precisa ver o que vem por aí, não só do dia.
-      const res = await fetch('/api/events/upcoming');
+      const res = await fetch(`/api/events?range=${state.range}`);
       state.events = await res.json();
-      // Ordena por horário ASC
       state.events.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
       renderEvents();
+      scheduleClientAnnouncements();
     } catch (err) {
       logEvent('ERR', 'Falha ao carregar eventos: ' + err.message);
     }
   }
+
+  // ============ HANDLER DOS BOTÕES DE RANGE ============
+  function setupRangeFilter() {
+    const filter = document.getElementById('rangeFilter');
+    if (!filter) return;
+    // Marca o botão ativo inicial
+    filter.querySelectorAll('button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.range === state.range);
+    });
+    filter.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-range]');
+      if (!btn) return;
+      const r = btn.dataset.range;
+      if (r === state.range) return;
+      state.range = r;
+      try { localStorage.setItem('winMonitorRange', r); } catch (_) {}
+      filter.querySelectorAll('button').forEach(b => {
+        b.classList.toggle('active', b.dataset.range === r);
+      });
+      loadEvents();
+      logEvent('SYS', `Filtro alterado para: ${r === 'today' ? 'HOJE' : r === 'tomorrow' ? 'AMANHÃ' : 'SEMANA'}`);
+    });
+  }
+  setupRangeFilter();
 
   // ============ SSE ============
   function connectSSE() {
@@ -939,13 +1106,21 @@
 
     sse.addEventListener('upcoming', (e) => {
       const ev = JSON.parse(e.data);
-      speakUpcoming(ev);
+      // O cliente já agenda os avisos baseado em state.settings.announceAheadSec.
+      // Só falamos pelo SSE se o cliente ainda não tiver falado desse evento.
+      if (!state.spokenUpcoming.has(ev.id)) {
+        state.spokenUpcoming.add(ev.id);
+        speakUpcoming(ev);
+      }
       loadEvents();
     });
 
     sse.addEventListener('release', (e) => {
       const ev = JSON.parse(e.data);
-      speakRelease(ev);
+      if (!state.spokenRelease.has(ev.id)) {
+        state.spokenRelease.add(ev.id);
+        speakRelease(ev);
+      }
       loadEvents();
     });
 
