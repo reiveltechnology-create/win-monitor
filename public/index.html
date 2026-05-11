@@ -188,11 +188,11 @@
 
   .event-row {
     display: grid;
-    grid-template-columns: 60px 60px 1fr auto;
+    grid-template-columns: 95px 60px 1fr auto;
     gap: 12px; align-items: center;
   }
 
-  .event-time { font-size: 13px; font-weight: 700; color: var(--text); }
+  .event-time { font-size: 13px; font-weight: 700; color: var(--text); white-space: nowrap; }
   .event-meta { display: flex; flex-direction: column; gap: 2px; font-size: 10px; }
   .event-country {
     font-weight: 700; letter-spacing: 0.1em;
@@ -892,10 +892,15 @@
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const evDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     const diffDays = Math.round((evDay - today) / (24 * 60 * 60 * 1000));
-    if (diffDays === 0) return 'HOJE';
-    if (diffDays === 1) return 'AMANHÃ';
-    if (diffDays === -1) return 'ONTEM';
-    return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+
+    const date = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }); // ex: 12/05
+    const weekday = d.toLocaleDateString('pt-BR', { weekday: 'short' })
+                     .replace('.', '').toUpperCase();                                  // ex: SEG, TER, QUA
+
+    if (diffDays === 0) return `HOJE · ${date}`;
+    if (diffDays === 1) return `AMANHÃ · ${date}`;
+    if (diffDays === -1) return `ONTEM · ${date}`;
+    return `${weekday} ${date}`;
   }
 
   function renderEvents() {
