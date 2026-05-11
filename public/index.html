@@ -240,6 +240,54 @@
     font-style: italic;
   }
 
+  /* ============ BLOCO DE IMPACTO (quando evento sai) ============ */
+  .impact-box {
+    margin-top: 10px;
+    padding: 10px 14px;
+    border-left: 3px solid;
+    background: var(--bg-elev-2);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .impact-box.BULLISH { border-left-color: var(--green); background: rgba(0, 255, 136, 0.04); }
+  .impact-box.BEARISH { border-left-color: var(--red); background: rgba(255, 56, 85, 0.04); }
+  .impact-box.NEUTRAL { border-left-color: var(--text-dim); }
+
+  .impact-header {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; margin-bottom: 4px;
+  }
+  .impact-header.BULLISH { color: var(--green); }
+  .impact-header.BEARISH { color: var(--red); }
+  .impact-header.NEUTRAL { color: var(--text); }
+  .impact-arrow {
+    font-size: 16px; line-height: 1;
+  }
+  .impact-summary {
+    color: var(--text); font-size: 11px;
+  }
+  .impact-summary strong {
+    color: var(--text);
+  }
+  .impact-meta {
+    margin-top: 4px; color: var(--text-dim); font-size: 10px;
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .impact-meta .lbl {
+    color: var(--text-mute); margin-right: 4px;
+  }
+  .impact-meta strong {
+    color: var(--text);
+  }
+
+  /* Destaque visual para evento já liberado */
+  .event.released-highlight {
+    background: linear-gradient(90deg, var(--bg-elev) 0%, var(--bg-elev-2) 100%);
+  }
+  .event-row .actual.bull-val { color: var(--green); font-size: 13px; }
+  .event-row .actual.bear-val { color: var(--red); font-size: 13px; }
+
   /* ============ LOG ============ */
   .log {
     background: var(--bg-elev);
@@ -859,21 +907,26 @@
   }
 
   function speakRelease(ev) {
-    // Frase curta e decisória: nome + realizado vs esperado + tendência
-    // Operador está no gráfico — frase longa atrapalha mais do que ajuda.
+    // Formato: "Nome do evento. PAÍS. Tendência X. Impacto típico entre A e B pontos."
+    const country = ev.country === 'BR' ? 'Brasil' : 'Estados Unidos';
+
     const tendencia = {
       BULLISH: 'tendência de alta',
       BEARISH: 'tendência de baixa',
       NEUTRAL: 'tendência neutra',
-      PENDING: ''
+      PENDING: 'sem projeção prévia'
     }[ev.bias] || '';
 
-    let phrase = ev.event + '. ';
-    if (ev.actual != null && ev.forecast != null) {
-      phrase += `Saiu ${ev.actual}, esperado ${ev.forecast}. `;
-    }
+    let phrase = `${ev.event}. ${country}. `;
+
     if (tendencia) {
-      phrase += tendencia + '.';
+      phrase += `${tendencia}.`;
+    }
+
+    // Impacto típico em pontos do WIN (só quando há viés direcional)
+    if ((ev.bias === 'BULLISH' || ev.bias === 'BEARISH')
+        && Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2) {
+      phrase += ` Impacto típico entre ${ev.typicalRange[0]} e ${ev.typicalRange[1]} pontos.`;
     }
 
     speak(phrase.trim());
@@ -884,6 +937,24 @@
   function fmtTime(iso) {
     const d = new Date(iso);
     return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Compara dois valores numéricos extraindo só o número (ignora %, K, M, etc)
+  function compareValues(actualStr, forecastStr) {
+    const parseNum = (s) => {
+      if (s == null) return null;
+      const m = String(s).replace(',', '.').match(/-?\d+(?:\.\d+)?/);
+      if (!m) return null;
+      let n = parseFloat(m[0]);
+      if (/K\b/i.test(s)) n *= 1000;
+      else if (/M\b/i.test(s)) n *= 1000000;
+      else if (/B\b/i.test(s)) n *= 1000000000;
+      return n;
+    };
+    const a = parseNum(actualStr);
+    const f = parseNum(forecastStr);
+    if (a == null || f == null) return null;
+    return { actual: a, forecast: f, diff: a - f };
   }
 
   function fmtDateLabel(iso) {
@@ -914,28 +985,92 @@
     list.innerHTML = state.events.map(ev => {
       const stars = '★'.repeat(ev.stars) + '☆'.repeat(3 - ev.stars);
       const klass = ev.released
-        ? (ev.bias === 'BULLISH' ? 'bullish' : ev.bias === 'BEARISH' ? 'bearish' : 'released')
+        ? (ev.bias === 'BULLISH' ? 'bullish released-highlight'
+          : ev.bias === 'BEARISH' ? 'bearish released-highlight'
+          : 'released released-highlight')
         : '';
       const flag = ev.country === 'BR' ? 'br' : 'us';
 
-      const biasLabel = {
-        BULLISH: 'TEND. ALTA',
-        BEARISH: 'TEND. BAIXA',
-        NEUTRAL: 'NEUTRA',
+      const tendenciaLabel = {
+        BULLISH: 'TENDÊNCIA DE ALTA',
+        BEARISH: 'TENDÊNCIA DE BAIXA',
+        NEUTRAL: 'TENDÊNCIA NEUTRA',
         PENDING: 'PENDENTE'
       }[ev.bias] || ev.bias;
 
-      const biasBlock = ev.released ? `
-        <div class="event-bias">
-          <span class="bias-tag ${ev.bias}">${biasLabel}</span>
-          ${ev.surprise != null && !isNaN(ev.surprise) ? `
-            <span class="surprise">surpresa: <strong>${ev.surprise.toFixed(1)}%</strong> · ${ev.magnitude}</span>
-          ` : ''}
-          ${Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2 ? `
-            <span class="surprise">faixa típica: <strong>${ev.typicalRange[0]}-${ev.typicalRange[1]} pts</strong></span>
-          ` : ''}
-        </div>
-      ` : '';
+      const tendenciaArrow = {
+        BULLISH: '▲',
+        BEARISH: '▼',
+        NEUTRAL: '◆',
+        PENDING: '•'
+      }[ev.bias] || '';
+
+      // Destaque colorido no valor atual conforme o viés
+      const actualValueClass = ev.released
+        ? (ev.bias === 'BULLISH' ? 'bull-val' : ev.bias === 'BEARISH' ? 'bear-val' : '')
+        : '';
+
+      // === BLOCO DE IMPACTO (quando saiu o número) ===
+      let impactBlock = '';
+      if (ev.released && ev.bias !== 'PENDING') {
+        const cmp = (ev.actual != null && ev.forecast != null)
+          ? compareValues(ev.actual, ev.forecast)
+          : null;
+
+        // Construir resumo legível em português
+        let resumo = `Saiu <strong>${ev.actual ?? '—'}</strong>`;
+        if (ev.forecast != null) {
+          resumo += `, esperado era <strong>${ev.forecast}</strong>`;
+          if (cmp) {
+            resumo += cmp.diff > 0
+              ? ` — <strong>acima</strong> da projeção`
+              : cmp.diff < 0
+                ? ` — <strong>abaixo</strong> da projeção`
+                : ` — <strong>em linha</strong> com a projeção`;
+          }
+        }
+        resumo += '.';
+
+        const faixa = (Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2)
+          ? `${ev.typicalRange[0]}–${ev.typicalRange[1]} pts WIN`
+          : '—';
+
+        const surpriseStr = (ev.surprise != null && !isNaN(ev.surprise) && Math.abs(ev.surprise) > 0)
+          ? `${ev.surprise > 0 ? '+' : ''}${ev.surprise.toFixed(1)}%`
+          : '—';
+
+        const magnitudeStr = {
+          large: 'grande',
+          medium: 'moderada',
+          small: 'pequena',
+          unknown: '—'
+        }[ev.magnitude] || ev.magnitude;
+
+        impactBlock = `
+          <div class="impact-box ${ev.bias}">
+            <div class="impact-header ${ev.bias}">
+              <span class="impact-arrow">${tendenciaArrow}</span>
+              <span>${tendenciaLabel} no mini índice</span>
+            </div>
+            <div class="impact-summary">${resumo}</div>
+            <div class="impact-meta">
+              <span><span class="lbl">surpresa:</span><strong>${surpriseStr}</strong> (${magnitudeStr})</span>
+              <span><span class="lbl">impacto típico:</span><strong>${faixa}</strong></span>
+            </div>
+          </div>
+        `;
+      } else if (ev.released && ev.bias === 'PENDING') {
+        // Saiu mas sem forecast pra comparar
+        impactBlock = `
+          <div class="impact-box NEUTRAL">
+            <div class="impact-header NEUTRAL">
+              <span class="impact-arrow">◆</span>
+              <span>NOTÍCIA DIVULGADA</span>
+            </div>
+            <div class="impact-summary">Saiu <strong>${ev.actual ?? '—'}</strong>. Sem projeção prévia disponível para comparação.</div>
+          </div>
+        `;
+      }
 
       return `
         <div class="event ${klass}" data-id="${ev.id}">
@@ -955,7 +1090,7 @@
             <div class="event-data">
               <div class="field">
                 <span class="field-lbl">ATUAL</span>
-                <span class="field-val actual">${ev.actual ?? '—'}${ev.unit && ev.actual ? ev.unit : ''}</span>
+                <span class="field-val actual ${actualValueClass}">${ev.actual ?? '—'}${ev.unit && ev.actual ? ev.unit : ''}</span>
               </div>
               <div class="field">
                 <span class="field-lbl">PREV</span>
@@ -967,7 +1102,7 @@
               </div>
             </div>
           </div>
-          ${biasBlock}
+          ${impactBlock}
           ${ev.notes ? `<div class="event-notes">${ev.notes}</div>` : ''}
         </div>
       `;
