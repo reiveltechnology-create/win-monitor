@@ -3,8 +3,8 @@
 // Fonte primária: ForexFactory (calendário público com horários e impacto)
 // Sem necessidade de chave de API, sem custo formal.
 //
-// Robustez: cache em memória da última resposta bem-sucedida, para o sistema
-// continuar mostrando a agenda mesmo se a fonte falhar temporariamente.
+// Robustez: cache em memória com TTL de 15 minutos para respeitar rate limit
+// do ForexFactory (HTTP 429). Os dados mudam pouco ao longo do dia mesmo.
 // =============================================================================
 
 import { classifyEvent, calculateBias } from './impactDb.js';
@@ -12,8 +12,15 @@ import { classifyEvent, calculateBias } from './impactDb.js';
 const FF_THIS_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 const FF_NEXT_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_nextweek.json';
 
-// Cache em memória: { events: [...], fetchedAt: Date, source: 'forexfactory' }
-let lastSuccessfulFetch = null;
+// TTL do cache — só busca de novo após esse intervalo
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutos
+
+// Cache em memória
+let cache = {
+  events: null,
+  fetchedAt: 0,
+  source: null
+};
 
 /**
  * Busca o calendário do ForexFactory com timeout e retry simples.
@@ -113,8 +120,18 @@ function normalizeFFEvent(item) {
 
 /**
  * Função principal — busca o calendário e retorna só hoje + amanhã.
+ * Usa cache de 15min pra respeitar rate limit do ForexFactory.
  */
 export async function fetchTodayAndTomorrow(apiKey /* mantido por compat, não usado */) {
+  const now = Date.now();
+  const cacheAge = now - cache.fetchedAt;
+
+  // Se cache ainda é válido, retorna dele direto
+  if (cache.events && cacheAge < CACHE_TTL_MS) {
+    return filterTodayAndTomorrow(cache.events);
+  }
+
+  // Cache expirou — busca novo
   const events = [];
   let success = false;
 
@@ -142,24 +159,28 @@ export async function fetchTodayAndTomorrow(apiKey /* mantido por compat, não u
       }
     }
   } catch (err) {
-    // Silencioso — não é crítico
+    // Silencioso
   }
 
-  // 3) Se a busca falhou completamente, usa cache anterior se houver
-  if (!success && lastSuccessfulFetch) {
-    console.log('[CACHE] Usando última resposta válida de', lastSuccessfulFetch.fetchedAt);
-    return filterTodayAndTomorrow(lastSuccessfulFetch.events);
-  }
-
-  // 4) Se foi sucesso, atualiza o cache
   if (success) {
-    lastSuccessfulFetch = {
+    cache = {
       events: [...events],
-      fetchedAt: new Date().toISOString()
+      fetchedAt: now,
+      source: 'forexfactory'
     };
+    console.log(`[CACHE] Atualizado com ${events.length} eventos. Próxima busca em ${CACHE_TTL_MS / 60000}min.`);
+    return filterTodayAndTomorrow(events);
   }
 
-  return filterTodayAndTomorrow(events);
+  // Busca falhou — se temos cache antigo, ainda usa
+  if (cache.events) {
+    const ageMin = Math.round(cacheAge / 60000);
+    console.log(`[CACHE] Busca falhou, usando cache de ${ageMin}min atrás`);
+    return filterTodayAndTomorrow(cache.events);
+  }
+
+  // Sem cache e sem dados frescos
+  return [];
 }
 
 function filterTodayAndTomorrow(allEvents) {
