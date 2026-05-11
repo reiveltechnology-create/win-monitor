@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  win-monitor:
+    build: .
+    container_name: win-monitor
+    restart: unless-stopped
+    ports:
+      - "3030:3030"
+    environment:
+      - PORT=3030
+      - TE_API_KEY=${TE_API_KEY:-guest:guest}
+      - POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC:-60}
+      - POLL_FAST_SEC=${POLL_FAST_SEC:-5}
+      - ANNOUNCE_AHEAD_MIN=${ANNOUNCE_AHEAD_MIN:-5}
+      - AUTH_USER=${AUTH_USER}
+      - AUTH_PASS=${AUTH_PASS}
+    volumes:
+      - ./data:/app/data
