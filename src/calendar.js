@@ -1,57 +1,144 @@
-// Cliente de calendário econômico — VERSÃO FONTES GRATUITAS
+// Cliente de calendário econômico — VERSÃO MULTI-FONTE
 // =============================================================================
-// Fonte primária: ForexFactory (calendário público com horários e impacto)
-// Sem necessidade de chave de API, sem custo formal.
+// Tenta múltiplas fontes em cascata para máxima resiliência:
+//   1. Investing.com (fonte principal)
+//   2. ForexFactory (fallback)
 //
-// Robustez: cache em memória com TTL de 15 minutos para respeitar rate limit
-// do ForexFactory (HTTP 429). Os dados mudam pouco ao longo do dia mesmo.
+// Cache em memória com TTL de 15 minutos para evitar rate limit.
 // =============================================================================
 
 import { classifyEvent, calculateBias } from './impactDb.js';
 
-const FF_THIS_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
-const FF_NEXT_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_nextweek.json';
+const CACHE_TTL_MS = 15 * 60 * 1000;
 
-// TTL do cache — só busca de novo após esse intervalo
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutos
-
-// Cache em memória
 let cache = {
   events: null,
   fetchedAt: 0,
   source: null
 };
 
-/**
- * Busca o calendário do ForexFactory com timeout e retry simples.
- */
-async function fetchForexFactory(url, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+// ============================================================
+// FONTE 1: INVESTING.COM
+// ============================================================
 
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (compatible; WinMonitor/1.0)',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const text = await res.text();
-    // Às vezes vem com BOM ou comentários — tenta parsear flexível
-    return JSON.parse(text);
-  } finally {
-    clearTimeout(timer);
-  }
+const INVESTING_URL = 'https://sbcharts.investing.com/events_calendar/economic_calendar.json';
+
+async function fetchInvestingDotCom() {
+  const res = await fetch(INVESTING_URL, {
+    headers: {
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+      'Referer': 'https://br.investing.com/economic-calendar/'
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
-/**
- * Converte impacto do ForexFactory para estrelas.
- */
+function parseInvestingCountry(currency) {
+  const c = (currency || '').toString().toUpperCase();
+  if (c === 'USD' || c === 'US' || c === '5') return 'US';
+  if (c === 'BRL' || c === 'BR' || c === 'BRA' || c === '32') return 'BR';
+  return null;
+}
+
+function parseInvestingStars(importance) {
+  if (typeof importance === 'number') return importance;
+  const s = String(importance || '').toLowerCase();
+  if (s.includes('high') || s === '3') return 3;
+  if (s.includes('medium') || s === '2') return 2;
+  if (s.includes('low') || s === '1') return 1;
+  return 0;
+}
+
+function normalizeInvestingEvent(item) {
+  const country = parseInvestingCountry(item.country || item.currency || item.country_id);
+  if (!country) return null;
+
+  const stars = parseInvestingStars(item.importance || item.priority || item.stars);
+  if (stars < 2) return null;
+
+  const eventName = item.event_name || item.event || item.name || item.title || '';
+  if (!eventName) return null;
+
+  const datetime = item.datetime || item.date || item.timestamp;
+  if (!datetime) return null;
+
+  const countryName = country === 'US' ? 'United States' : 'Brazil';
+  const classification = classifyEvent(eventName, countryName);
+
+  const actual = (item.actual != null && item.actual !== '' && item.actual !== '-') ? String(item.actual) : null;
+  const forecast = (item.forecast != null && item.forecast !== '' && item.forecast !== '-') ? String(item.forecast) : null;
+  const previous = (item.previous != null && item.previous !== '' && item.previous !== '-') ? String(item.previous) : null;
+
+  const biasInfo = calculateBias(actual, forecast, previous, classification);
+
+  return {
+    id: `inv_${eventName}_${datetime}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+    datetime: typeof datetime === 'number' ? new Date(datetime * 1000).toISOString() : datetime,
+    country,
+    countryName,
+    event: eventName,
+    reference: '',
+    stars,
+    actual,
+    forecast,
+    previous,
+    unit: item.unit || '',
+    bias: biasInfo.bias,
+    surprise: biasInfo.surprise,
+    magnitude: biasInfo.magnitude,
+    direction: classification?.direction || 'neutral',
+    typicalRange: classification?.typicalRange || [],
+    notes: classification?.notes || '',
+    released: actual != null,
+    source: 'investing'
+  };
+}
+
+async function fetchFromInvesting() {
+  const data = await fetchInvestingDotCom();
+
+  let items = [];
+  if (Array.isArray(data)) {
+    items = data;
+  } else if (data && typeof data === 'object') {
+    items = data.data || data.events || data.economic_calendar || data.calendar || [];
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('Estrutura inesperada ou vazia');
+  }
+
+  const events = [];
+  for (const item of items) {
+    const norm = normalizeInvestingEvent(item);
+    if (norm) events.push(norm);
+  }
+  return events;
+}
+
+// ============================================================
+// FONTE 2: FOREXFACTORY (fallback)
+// ============================================================
+
+const FF_THIS_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const FF_NEXT_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_nextweek.json';
+
+async function fetchForexFactory(url) {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (compatible; WinMonitor/1.0)'
+    }
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 function impactToStars(impact) {
   const i = (impact || '').toLowerCase();
   if (i === 'high') return 3;
@@ -60,23 +147,16 @@ function impactToStars(impact) {
   return 0;
 }
 
-/**
- * Mapeia código de moeda do ForexFactory para nosso código de país.
- */
 function ffCountryCode(currency) {
   const c = (currency || '').toUpperCase();
   if (c === 'USD') return 'US';
   if (c === 'BRL') return 'BR';
-  return null; // outros são ignorados
+  return null;
 }
 
-/**
- * Normaliza um item do ForexFactory para o formato interno.
- */
 function normalizeFFEvent(item) {
   const country = ffCountryCode(item.country);
   if (!country) return null;
-
   const stars = impactToStars(item.impact);
   if (stars < 2) return null;
 
@@ -118,24 +198,8 @@ function normalizeFFEvent(item) {
   };
 }
 
-/**
- * Função principal — busca o calendário e retorna só hoje + amanhã.
- * Usa cache de 15min pra respeitar rate limit do ForexFactory.
- */
-export async function fetchTodayAndTomorrow(apiKey /* mantido por compat, não usado */) {
-  const now = Date.now();
-  const cacheAge = now - cache.fetchedAt;
-
-  // Se cache ainda é válido, retorna dele direto
-  if (cache.events && cacheAge < CACHE_TTL_MS) {
-    return filterTodayAndTomorrow(cache.events);
-  }
-
-  // Cache expirou — busca novo
+async function fetchFromForexFactory() {
   const events = [];
-  let success = false;
-
-  // 1) Esta semana
   try {
     const data = await fetchForexFactory(FF_THIS_WEEK_URL);
     if (Array.isArray(data)) {
@@ -143,13 +207,10 @@ export async function fetchTodayAndTomorrow(apiKey /* mantido por compat, não u
         const norm = normalizeFFEvent(item);
         if (norm) events.push(norm);
       }
-      success = true;
     }
   } catch (err) {
-    console.error('[ForexFactory thisweek] Erro:', err.message);
+    throw new Error(`thisweek: ${err.message}`);
   }
-
-  // 2) Próxima semana (não-fatal)
   try {
     const data = await fetchForexFactory(FF_NEXT_WEEK_URL);
     if (Array.isArray(data)) {
@@ -158,28 +219,51 @@ export async function fetchTodayAndTomorrow(apiKey /* mantido por compat, não u
         if (norm) events.push(norm);
       }
     }
-  } catch (err) {
-    // Silencioso
-  }
+  } catch (_) { /* não fatal */ }
+  return events;
+}
 
-  if (success) {
-    cache = {
-      events: [...events],
-      fetchedAt: now,
-      source: 'forexfactory'
-    };
-    console.log(`[CACHE] Atualizado com ${events.length} eventos. Próxima busca em ${CACHE_TTL_MS / 60000}min.`);
-    return filterTodayAndTomorrow(events);
-  }
+// ============================================================
+// ORQUESTRAÇÃO MULTI-FONTE
+// ============================================================
 
-  // Busca falhou — se temos cache antigo, ainda usa
-  if (cache.events) {
-    const ageMin = Math.round(cacheAge / 60000);
-    console.log(`[CACHE] Busca falhou, usando cache de ${ageMin}min atrás`);
+export async function fetchTodayAndTomorrow(apiKey /* compat */) {
+  const now = Date.now();
+  const cacheAge = now - cache.fetchedAt;
+
+  if (cache.events && cacheAge < CACHE_TTL_MS) {
     return filterTodayAndTomorrow(cache.events);
   }
 
-  // Sem cache e sem dados frescos
+  const sources = [
+    { name: 'Investing.com', fn: fetchFromInvesting },
+    { name: 'ForexFactory',  fn: fetchFromForexFactory }
+  ];
+
+  let lastError = null;
+  for (const source of sources) {
+    try {
+      const events = await source.fn();
+      if (events.length > 0) {
+        cache = { events, fetchedAt: now, source: source.name };
+        console.log(`[CALENDAR] ${source.name}: ${events.length} eventos. Próx. atualização em ${CACHE_TTL_MS / 60000}min.`);
+        return filterTodayAndTomorrow(events);
+      } else {
+        console.log(`[CALENDAR] ${source.name}: 0 eventos, tentando próxima...`);
+      }
+    } catch (err) {
+      lastError = err;
+      console.error(`[CALENDAR] ${source.name} falhou:`, err.message);
+    }
+  }
+
+  if (cache.events) {
+    const ageMin = Math.round(cacheAge / 60000);
+    console.log(`[CALENDAR] Todas as fontes falharam, usando cache de ${ageMin}min atrás`);
+    return filterTodayAndTomorrow(cache.events);
+  }
+
+  console.error('[CALENDAR] Sem fonte e sem cache. Último erro:', lastError?.message);
   return [];
 }
 
@@ -195,7 +279,6 @@ function filterTodayAndTomorrow(allEvents) {
     .sort((a, b) => a.datetime.localeCompare(b.datetime));
 }
 
-// Compat
 export function formatDate(date) {
   return date.toISOString().slice(0, 10);
 }
