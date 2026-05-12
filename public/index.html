@@ -906,31 +906,55 @@
     logEvent('UPCOMING', `${ev.country} ${ev.event} (${whenLabel})`);
   }
 
+  // Compara actual vs previous quando não há forecast — usa pra dar uma
+  // tendência aproximada baseada na direção do indicador.
+  function inferBiasFromPrevious(ev) {
+    if (!ev.actual || !ev.previous) return ev.bias;
+    const cmp = compareValues(ev.actual, ev.previous);
+    if (!cmp || cmp.diff === 0) return 'NEUTRAL';
+    const above = cmp.diff > 0;
+    switch (ev.direction) {
+      case 'hawkish_bad':  return above ? 'BEARISH' : 'BULLISH';
+      case 'hawkish_good': return above ? 'BULLISH' : 'BEARISH';
+      case 'dovish_good':  return above ? 'BEARISH' : 'BULLISH';
+      default:             return 'NEUTRAL';
+    }
+  }
+
   function speakRelease(ev) {
     // Formato: "Nome do evento. PAÍS. Tendência X. Impacto típico entre A e B pontos."
     const country = ev.country === 'BR' ? 'Brasil' : 'Estados Unidos';
+
+    // Se não temos forecast, tenta inferir bias do comparativo com previous
+    let effectiveBias = ev.bias;
+    if (effectiveBias === 'PENDING' && ev.actual && ev.previous) {
+      effectiveBias = inferBiasFromPrevious(ev);
+    }
 
     const tendencia = {
       BULLISH: 'tendência de alta',
       BEARISH: 'tendência de baixa',
       NEUTRAL: 'tendência neutra',
-      PENDING: 'sem projeção prévia'
-    }[ev.bias] || '';
+      PENDING: ''  // sem projeção e sem previous - só anuncia o evento
+    }[effectiveBias] || '';
 
     let phrase = `${ev.event}. ${country}. `;
 
     if (tendencia) {
       phrase += `${tendencia}.`;
+    } else {
+      // Sem forecast e sem previous — anuncia que saiu pra atenção
+      phrase += 'Notícia divulgada, atenção ao mercado.';
     }
 
     // Impacto típico em pontos do WIN (só quando há viés direcional)
-    if ((ev.bias === 'BULLISH' || ev.bias === 'BEARISH')
+    if ((effectiveBias === 'BULLISH' || effectiveBias === 'BEARISH')
         && Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2) {
       phrase += ` Impacto típico entre ${ev.typicalRange[0]} e ${ev.typicalRange[1]} pontos.`;
     }
 
     speak(phrase.trim());
-    logEvent('RELEASE', `${ev.country} ${ev.event} → ${ev.bias}${ev.actual ? ` (${ev.actual} vs ${ev.forecast})` : ''}`);
+    logEvent('RELEASE', `${ev.country} ${ev.event} → ${effectiveBias}${ev.actual ? ` (${ev.actual} vs ${ev.forecast || ev.previous})` : ''}`);
   }
 
   // ============ RENDER DA AGENDA ============
@@ -984,96 +1008,104 @@
 
     list.innerHTML = state.events.map(ev => {
       const stars = '★'.repeat(ev.stars) + '☆'.repeat(3 - ev.stars);
-      const klass = ev.released
-        ? (ev.bias === 'BULLISH' ? 'bullish released-highlight'
-          : ev.bias === 'BEARISH' ? 'bearish released-highlight'
-          : 'released released-highlight')
-        : '';
       const flag = ev.country === 'BR' ? 'br' : 'us';
+
+      // Se não temos forecast, infere bias do actual vs previous
+      let displayBias = ev.bias;
+      if (ev.released && displayBias === 'PENDING' && ev.actual && ev.previous) {
+        displayBias = inferBiasFromPrevious(ev);
+      }
 
       const tendenciaLabel = {
         BULLISH: 'TENDÊNCIA DE ALTA',
         BEARISH: 'TENDÊNCIA DE BAIXA',
         NEUTRAL: 'TENDÊNCIA NEUTRA',
-        PENDING: 'PENDENTE'
-      }[ev.bias] || ev.bias;
+        PENDING: 'NOTÍCIA DIVULGADA'
+      }[displayBias] || displayBias;
 
       const tendenciaArrow = {
         BULLISH: '▲',
         BEARISH: '▼',
         NEUTRAL: '◆',
-        PENDING: '•'
-      }[ev.bias] || '';
+        PENDING: '◆'
+      }[displayBias] || '';
 
       // Destaque colorido no valor atual conforme o viés
       const actualValueClass = ev.released
-        ? (ev.bias === 'BULLISH' ? 'bull-val' : ev.bias === 'BEARISH' ? 'bear-val' : '')
+        ? (displayBias === 'BULLISH' ? 'bull-val' : displayBias === 'BEARISH' ? 'bear-val' : '')
         : '';
 
       // === BLOCO DE IMPACTO (quando saiu o número) ===
       let impactBlock = '';
-      if (ev.released && ev.bias !== 'PENDING') {
-        const cmp = (ev.actual != null && ev.forecast != null)
+      if (ev.released) {
+        // Comparativo principal: actual vs forecast OU actual vs previous
+        const cmpFcst = (ev.actual != null && ev.forecast != null)
           ? compareValues(ev.actual, ev.forecast)
           : null;
+        const cmpPrev = (ev.actual != null && ev.previous != null)
+          ? compareValues(ev.actual, ev.previous)
+          : null;
 
-        // Construir resumo legível em português
+        // Resumo legível em português
         let resumo = `Saiu <strong>${ev.actual ?? '—'}</strong>`;
-        if (ev.forecast != null) {
+        if (ev.forecast != null && cmpFcst) {
           resumo += `, esperado era <strong>${ev.forecast}</strong>`;
-          if (cmp) {
-            resumo += cmp.diff > 0
-              ? ` — <strong>acima</strong> da projeção`
-              : cmp.diff < 0
-                ? ` — <strong>abaixo</strong> da projeção`
-                : ` — <strong>em linha</strong> com a projeção`;
-          }
+          resumo += cmpFcst.diff > 0
+            ? ` — <strong>acima</strong> da projeção`
+            : cmpFcst.diff < 0
+              ? ` — <strong>abaixo</strong> da projeção`
+              : ` — <strong>em linha</strong> com a projeção`;
+        } else if (ev.previous != null && cmpPrev) {
+          resumo += `, anterior <strong>${ev.previous}</strong>`;
+          resumo += cmpPrev.diff > 0
+            ? ` — <strong>acelerou</strong> em relação ao anterior`
+            : cmpPrev.diff < 0
+              ? ` — <strong>desacelerou</strong> em relação ao anterior`
+              : ` — <strong>estável</strong> em relação ao anterior`;
         }
         resumo += '.';
 
         const faixa = (Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2)
           ? `${ev.typicalRange[0]}–${ev.typicalRange[1]} pts WIN`
-          : '—';
+          : null;
 
         const surpriseStr = (ev.surprise != null && !isNaN(ev.surprise) && Math.abs(ev.surprise) > 0)
           ? `${ev.surprise > 0 ? '+' : ''}${ev.surprise.toFixed(1)}%`
-          : '—';
+          : null;
 
         const magnitudeStr = {
-          large: 'grande',
-          medium: 'moderada',
-          small: 'pequena',
-          unknown: '—'
+          large: 'grande', medium: 'moderada', small: 'pequena', unknown: '—'
         }[ev.magnitude] || ev.magnitude;
 
+        const metaParts = [];
+        if (surpriseStr) metaParts.push(`<span><span class="lbl">surpresa:</span><strong>${surpriseStr}</strong> (${magnitudeStr})</span>`);
+        if (faixa && (displayBias === 'BULLISH' || displayBias === 'BEARISH'))
+          metaParts.push(`<span><span class="lbl">impacto típico:</span><strong>${faixa}</strong></span>`);
+
+        const headerSuffix = (displayBias === 'BULLISH' || displayBias === 'BEARISH')
+          ? ' no mini índice' : '';
+
         impactBlock = `
-          <div class="impact-box ${ev.bias}">
-            <div class="impact-header ${ev.bias}">
+          <div class="impact-box ${displayBias}">
+            <div class="impact-header ${displayBias}">
               <span class="impact-arrow">${tendenciaArrow}</span>
-              <span>${tendenciaLabel} no mini índice</span>
+              <span>${tendenciaLabel}${headerSuffix}</span>
             </div>
             <div class="impact-summary">${resumo}</div>
-            <div class="impact-meta">
-              <span><span class="lbl">surpresa:</span><strong>${surpriseStr}</strong> (${magnitudeStr})</span>
-              <span><span class="lbl">impacto típico:</span><strong>${faixa}</strong></span>
-            </div>
-          </div>
-        `;
-      } else if (ev.released && ev.bias === 'PENDING') {
-        // Saiu mas sem forecast pra comparar
-        impactBlock = `
-          <div class="impact-box NEUTRAL">
-            <div class="impact-header NEUTRAL">
-              <span class="impact-arrow">◆</span>
-              <span>NOTÍCIA DIVULGADA</span>
-            </div>
-            <div class="impact-summary">Saiu <strong>${ev.actual ?? '—'}</strong>. Sem projeção prévia disponível para comparação.</div>
+            ${metaParts.length ? `<div class="impact-meta">${metaParts.join('')}</div>` : ''}
           </div>
         `;
       }
 
+      // Atualiza klass para usar displayBias também
+      const klassReleased = ev.released
+        ? (displayBias === 'BULLISH' ? 'bullish released-highlight'
+          : displayBias === 'BEARISH' ? 'bearish released-highlight'
+          : 'released released-highlight')
+        : '';
+
       return `
-        <div class="event ${klass}" data-id="${ev.id}">
+        <div class="event ${klassReleased}" data-id="${ev.id}">
           <div class="event-row">
             <div class="event-time">
               <div style="font-size: 9px; color: var(--text-mute); letter-spacing: 0.1em; margin-bottom: 2px;">${fmtDateLabel(ev.datetime)}</div>
@@ -1155,38 +1187,66 @@
   // ============ AGENDAMENTO LOCAL DE AVISOS ============
   // O servidor manda avisos baseado em ANNOUNCE_AHEAD_MIN (default 5min).
   // Mas o operador pode preferir 1min, 30s, 10min... Então o NAVEGADOR
-  // também agenda seus próprios avisos baseado em state.settings.announceAheadSec.
-  // Usamos um Set pra não falar duas vezes do mesmo evento.
+  // ============ AGENDAMENTO LOCAL DE AVISOS ============
+  // O servidor manda avisos via SSE, mas o NAVEGADOR também agenda os seus
+  // próprios baseado em state.settings.announceAheadSec. Isso garante que:
+  //  - A antecedência configurada pelo operador funcione
+  //  - O aviso de release aconteça na hora exata do evento (mesmo se a fonte
+  //    de dados demorar pra refletir o valor "actual")
   state.spokenUpcoming = new Set();
   state.spokenRelease = new Set();
+  state.scheduledTimers = {};  // id -> [timer1, timer2] pra poder cancelar
 
   function scheduleClientAnnouncements() {
     const now = Date.now();
     const aheadMs = (state.settings.announceAheadSec || 300) * 1000;
 
     for (const ev of state.events) {
-      if (ev.released) continue;
-      if (state.spokenUpcoming.has(ev.id)) continue;
       const evTime = new Date(ev.datetime).getTime();
-      const triggerTime = evTime - aheadMs;
-      const delay = triggerTime - now;
 
-      // Já passou o momento de avisar? Pula.
-      if (delay < -10000) continue;
-      // Estamos dentro da janela de aviso (entre trigger time e hora do evento)
-      if (delay <= 0 && evTime > now) {
-        state.spokenUpcoming.add(ev.id);
-        const secsUntil = Math.max(5, Math.round((evTime - now) / 1000));
-        speakUpcoming({ ...ev, secondsUntil: secsUntil });
-        continue;
+      // ===== 1) ANÚNCIO PRÉVIO (X minutos antes) =====
+      if (!ev.released && !state.spokenUpcoming.has(ev.id)) {
+        const triggerTime = evTime - aheadMs;
+        const delay = triggerTime - now;
+
+        if (delay < -10000) {
+          // Janela já passou há mais de 10s - pula
+        } else if (delay <= 0 && evTime > now) {
+          // Estamos dentro da janela de aviso
+          state.spokenUpcoming.add(ev.id);
+          const secsUntil = Math.max(5, Math.round((evTime - now) / 1000));
+          speakUpcoming({ ...ev, secondsUntil: secsUntil });
+        } else if (delay > 0 && delay < 24 * 60 * 60 * 1000) {
+          // Agenda
+          state.spokenUpcoming.add(ev.id);
+          const secsAhead = Math.round(aheadMs / 1000);
+          const t = setTimeout(() => {
+            speakUpcoming({ ...ev, secondsUntil: secsAhead });
+          }, delay);
+          (state.scheduledTimers[ev.id] = state.scheduledTimers[ev.id] || []).push(t);
+        }
       }
-      // Agendar pra falar no momento certo
-      if (delay > 0 && delay < 24 * 60 * 60 * 1000) {
-        state.spokenUpcoming.add(ev.id);
-        const secsAhead = Math.round(aheadMs / 1000);
-        setTimeout(() => {
-          speakUpcoming({ ...ev, secondsUntil: secsAhead });
-        }, delay);
+
+      // ===== 2) ANÚNCIO DE RELEASE (na hora exata do evento) =====
+      // Acontece independente do servidor detectar o actual — o cliente avisa
+      // no horário do evento que "agora está saindo a notícia".
+      if (!state.spokenRelease.has(ev.id)) {
+        const releaseDelay = evTime - now;
+        if (releaseDelay > 0 && releaseDelay < 24 * 60 * 60 * 1000) {
+          // Agenda pra hora exata
+          const t = setTimeout(() => {
+            // Pega versão mais recente do evento (pode ter sido atualizado pelo SSE)
+            const fresh = state.events.find(e => e.id === ev.id) || ev;
+            if (state.spokenRelease.has(fresh.id)) return; // já foi falado pelo SSE
+            state.spokenRelease.add(fresh.id);
+            speakRelease(fresh);
+          }, releaseDelay);
+          (state.scheduledTimers[ev.id] = state.scheduledTimers[ev.id] || []).push(t);
+        } else if (ev.released && releaseDelay <= 0 && releaseDelay >= -300000) {
+          // Já está liberado, dentro dos últimos 5 min e ainda não falamos
+          state.spokenRelease.add(ev.id);
+          speakRelease(ev);
+        }
       }
     }
   }
