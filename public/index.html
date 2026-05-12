@@ -921,11 +921,23 @@
     }
   }
 
+  // Quando o número saiu mas não temos forecast nem previous comparável,
+  // ainda assim damos uma direção baseada na natureza do indicador.
+  // Premissa: indicadores são publicados com referência ao consenso de mercado
+  // que normalmente está em torno do equilíbrio. Sem dado pra comparar, usamos
+  // a direção natural do indicador como fallback informativo.
+  function inferBiasFromDirection(direction) {
+    // Quando saiu um número e não temos forecast, retornamos NEUTRAL pra não
+    // arriscar uma tendência errada — mas o speakRelease vai usar essa info
+    // junto com a "direction" pra dar uma orientação ao operador.
+    return 'NEUTRAL';
+  }
+
   function speakRelease(ev) {
     // Formato: "Nome do evento. PAÍS. Tendência X. Impacto típico entre A e B pontos."
     const country = ev.country === 'BR' ? 'Brasil' : 'Estados Unidos';
 
-    // Se não temos forecast, tenta inferir bias do comparativo com previous
+    // Decide qual bias usar pra falar
     let effectiveBias = ev.bias;
     if (effectiveBias === 'PENDING' && ev.actual && ev.previous) {
       effectiveBias = inferBiasFromPrevious(ev);
@@ -935,21 +947,27 @@
       BULLISH: 'tendência de alta',
       BEARISH: 'tendência de baixa',
       NEUTRAL: 'tendência neutra',
-      PENDING: ''  // sem projeção e sem previous - só anuncia o evento
+      PENDING: ''
     }[effectiveBias] || '';
 
     let phrase = `${ev.event}. ${country}. `;
 
-    if (tendencia) {
+    if (tendencia && effectiveBias !== 'PENDING') {
       phrase += `${tendencia}.`;
     } else {
-      // Sem forecast e sem previous — anuncia que saiu pra atenção
-      phrase += 'Notícia divulgada, atenção ao mercado.';
+      // Sem forecast e sem previous comparável — usa a natureza do indicador
+      // pra dar uma orientação direcional ao operador (genérica mas útil).
+      const orientacaoPorNatureza = {
+        hawkish_bad:  'analise se veio acima do consenso, pois isso tende a pressionar o mini índice para baixa',
+        hawkish_good: 'analise se veio acima do consenso, pois isso tende a favorecer o mini índice em alta',
+        dovish_good:  'analise se veio abaixo do consenso, pois isso tende a favorecer o mini índice em alta',
+        neutral:      'avalie o tom do comunicado e o resultado divulgado'
+      }[ev.direction] || 'avalie o resultado divulgado';
+      phrase += orientacaoPorNatureza + '.';
     }
 
-    // Impacto típico em pontos do WIN (só quando há viés direcional)
-    if ((effectiveBias === 'BULLISH' || effectiveBias === 'BEARISH')
-        && Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2) {
+    // Impacto típico em pontos do WIN (sempre que houver faixa definida)
+    if (Array.isArray(ev.typicalRange) && ev.typicalRange.length === 2) {
       phrase += ` Impacto típico entre ${ev.typicalRange[0]} e ${ev.typicalRange[1]} pontos.`;
     }
 

@@ -138,31 +138,73 @@ function getFocusCalendar(year) {
 
 /**
  * Busca a expectativa Focus mais recente pra cada indicador.
- * Usado pra preencher "forecast" dos eventos brasileiros.
+ * O Focus publica expectativa MENSAL do IPCA — exatamente o que precisamos
+ * pra comparar com o release do IBGE (que também é mensal).
  */
 async function fetchLatestFocusExpectations() {
+  const out = { ipcaMensal: null, ipcaAnual: null, selic: null };
+
+  // Expectativa MENSAL do IPCA (próxima divulgação)
+  // Usa ExpectativasMercadoTop5Mensais que dá direto a mediana dos top 5 analistas
   try {
-    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativaMercadoMensais?$top=50&$orderby=Data%20desc&$format=json&$filter=Indicador%20eq%20%27IPCA%27`;
+    const nowYear = new Date().getFullYear();
+    const nowMonth = String(new Date().getMonth() + 1).padStart(2, '0');
+    const dataRef = `${nowMonth}/${nowYear}`;
+    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoTop5Mensais?$top=20&$orderby=Data%20desc&$format=json&$filter=Indicador%20eq%20%27IPCA%27%20and%20DataReferencia%20eq%20%27${encodeURIComponent(dataRef)}%27`;
     const res = await fetch(url, {
       signal: AbortSignal.timeout(10000),
       headers: { 'Accept': 'application/json' }
     });
-    if (!res.ok) return {};
-    const json = await res.json();
-    // Pega a primeira expectativa do mês corrente
-    const current = json.value?.[0];
-    return current ? { ipca: current.Mediana } : {};
-  } catch (_) {
-    return {};
-  }
+    if (res.ok) {
+      const json = await res.json();
+      const current = json.value?.[0];
+      if (current) out.ipcaMensal = current.Mediana;
+    }
+  } catch (_) {}
+
+  // Expectativa ANUAL (acumulado 12 meses) também pra contexto
+  try {
+    const nowYear = new Date().getFullYear();
+    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=10&$orderby=Data%20desc&$format=json&$filter=Indicador%20eq%20%27IPCA%27%20and%20DataReferencia%20eq%20%27${nowYear}%27`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
+      headers: { 'Accept': 'application/json' }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const current = json.value?.[0];
+      if (current) out.ipcaAnual = current.Mediana;
+    }
+  } catch (_) {}
+
+  // Expectativa da Selic
+  try {
+    const nowYear = new Date().getFullYear();
+    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoSelic?$top=10&$orderby=Data%20desc&$format=json&$filter=DataReferencia%20eq%20%27${nowYear}%27`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
+      headers: { 'Accept': 'application/json' }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const current = json.value?.[0];
+      if (current) out.selic = current.Mediana;
+    }
+  } catch (_) {}
+
+  return out;
 }
 
 /**
- * Busca o último valor publicado de Selic e IPCA pra preencher "previous".
+ * Busca o último valor publicado para preencher "previous".
+ *  - Selic anual: série SGS 432
+ *  - IPCA mensal: série SGS 433 (TAXA mensal, comparável com o release)
+ *  - IPCA acumulado 12m: série SGS 13522 (pra contexto)
  */
 async function fetchLatestBCBData() {
-  const out = { selic: null, ipca: null };
-  // Selic atual via API SGS
+  const out = { selic: null, ipcaMensal: null, ipcaAnual: null };
+
+  // Selic
   try {
     const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json', {
       signal: AbortSignal.timeout(8000),
@@ -173,7 +215,20 @@ async function fetchLatestBCBData() {
       if (Array.isArray(data) && data[0]) out.selic = data[0].valor;
     }
   } catch (_) {}
-  // IPCA acumulado 12m via SGS
+
+  // IPCA mensal — série 433 (esse é o que sai mensalmente e é o que o operador compara)
+  try {
+    const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/1?formato=json', {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'Accept': 'application/json' }
+    });
+    if (r.ok) {
+      const data = await r.json();
+      if (Array.isArray(data) && data[0]) out.ipcaMensal = data[0].valor;
+    }
+  } catch (_) {}
+
+  // IPCA acumulado 12 meses — série 13522 (pra contexto)
   try {
     const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/1?formato=json', {
       signal: AbortSignal.timeout(8000),
@@ -181,9 +236,10 @@ async function fetchLatestBCBData() {
     });
     if (r.ok) {
       const data = await r.json();
-      if (Array.isArray(data) && data[0]) out.ipca = data[0].valor;
+      if (Array.isArray(data) && data[0]) out.ipcaAnual = data[0].valor;
     }
   } catch (_) {}
+
   return out;
 }
 
@@ -242,8 +298,8 @@ async function fetchFromBR() {
       reference: item.reference,
       stars: 3,
       actual: null,
-      forecast: focus.ipca ? `${focus.ipca}%` : null,
-      previous: latest.ipca ? `${latest.ipca}%` : null,
+      forecast: focus.ipcaMensal != null ? `${focus.ipcaMensal}%` : null,
+      previous: latest.ipcaMensal != null ? `${latest.ipcaMensal}%` : null,
       unit: '',
       bias: 'PENDING',
       surprise: 0,
