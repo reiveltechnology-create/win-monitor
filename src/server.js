@@ -10,7 +10,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
-import { fetchTodayAndTomorrow } from './calendar.js';
+import { fetchTodayAndTomorrow, getSourceInfo } from './calendar.js';
 import { generateAnalysis, getCachedAnalysis, clearAnalysisCache, getMode } from './analyze.js';
 import { getApiKey, getApiKeySource, setApiKey, maskApiKey, testApiKey } from './apiKey.js';
 
@@ -217,6 +217,23 @@ app.get('/api/events', (req, res) => {
   }
 
   res.json(eventsInRange(start.toISOString(), end.toISOString()));
+});
+
+// ============ DIAGNÓSTICO DE FONTE ============
+app.get('/api/source/status', (req, res) => {
+  const info = getSourceInfo();
+  res.json(info);
+});
+
+// Força atualização forçada (limpa cache e busca de novo)
+app.post('/api/source/refresh', async (req, res) => {
+  try {
+    await pollOnce();
+    const info = getSourceInfo();
+    res.json({ ok: true, ...info });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ============ ANÁLISE COM CLAUDE API ============

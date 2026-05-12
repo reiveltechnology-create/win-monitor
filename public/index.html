@@ -792,6 +792,23 @@
       <div id="cfgClaudeFeedback" style="margin-top: 8px; font-size: 10px; min-height: 14px;"></div>
     </div>
 
+    <!-- ============ STATUS DA FONTE DE DADOS ============ -->
+    <div class="field-group" style="margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px;">
+      <label style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <span>📡 Fonte de dados</span>
+        <span id="cfgSourceStatus" class="claude-status claude-status-none">verificando...</span>
+      </label>
+      <div style="font-size: 10px; color: var(--text-mute); margin-bottom: 8px;">
+        Investing.com é a fonte primária. Se ele bloquear, sistema usa ForexFactory como fallback.
+      </div>
+      <div id="cfgSourceDetails" style="font-size: 10px; color: var(--text-dim); padding: 8px; background: var(--bg-elev); border-radius: 2px; margin-bottom: 8px; font-family: var(--mono); white-space: pre-line;">
+        carregando...
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="preview-btn" id="refreshSourceBtn">↻ Forçar atualização</button>
+      </div>
+    </div>
+
     <div class="save-row">
       <button class="save-btn" id="saveSettingsBtn">SALVAR</button>
     </div>
@@ -995,6 +1012,7 @@
     document.getElementById('cfgClaudeFeedback').textContent = '';
     document.getElementById('cfgClaudeFeedback').className = '';
     refreshClaudeStatus();
+    refreshSourceStatus();
     settingsModal.classList.add('open');
   });
 
@@ -1137,6 +1155,65 @@
       }
     } catch (err) {
       setClaudeFeedback(`❌ ${err.message}`, 'error');
+    }
+  });
+
+  // ============ STATUS DA FONTE DE DADOS ============
+  async function refreshSourceStatus() {
+    const badge = document.getElementById('cfgSourceStatus');
+    const details = document.getElementById('cfgSourceDetails');
+    if (!badge || !details) return;
+
+    badge.className = 'claude-status claude-status-testing';
+    badge.textContent = 'verificando...';
+    try {
+      const res = await fetch('/api/source/status');
+      const info = await res.json();
+      const src = info.source || 'nenhum';
+      const cnt = info.eventsCount || 0;
+      const cacheAgeMin = info.cacheAgeMs != null
+        ? Math.round(info.cacheAgeMs / 60000)
+        : null;
+
+      if (src.startsWith('investing')) {
+        badge.className = 'claude-status claude-status-ok';
+        badge.textContent = 'INVESTING.COM';
+      } else if (src === 'forexfactory') {
+        badge.className = 'claude-status claude-status-testing';
+        badge.textContent = 'FALLBACK (ForexFactory)';
+      } else {
+        badge.className = 'claude-status claude-status-error';
+        badge.textContent = 'SEM FONTE';
+      }
+
+      const lines = [
+        `Fonte ativa:     ${src}`,
+        `Eventos no cache: ${cnt}`,
+        `Cache atualizado: ${cacheAgeMin != null ? `${cacheAgeMin}min atrás` : 'nunca'}`,
+        `ScrapingBee:      ${info.scrapingBeeConfigured ? 'configurado ✓' : 'não configurado'}`
+      ];
+      details.textContent = lines.join('\n');
+    } catch (err) {
+      badge.className = 'claude-status claude-status-error';
+      badge.textContent = 'ERRO';
+      details.textContent = `Erro: ${err.message}`;
+    }
+  }
+
+  document.getElementById('refreshSourceBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('refreshSourceBtn');
+    btn.disabled = true;
+    btn.textContent = '↻ Atualizando...';
+    try {
+      await fetch('/api/source/refresh', { method: 'POST' });
+      await refreshSourceStatus();
+      loadEvents();
+      logEvent('SYS', 'Fonte de dados atualizada manualmente');
+    } catch (err) {
+      logEvent('ERR', 'Falha ao atualizar fonte: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '↻ Forçar atualização';
     }
   });
 

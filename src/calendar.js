@@ -1,13 +1,13 @@
-// Cliente de calendário econômico — FONTES OFICIAIS
+// Cliente de calendário econômico — INVESTING.COM
 // =============================================================================
-// Brasil:
-//   - BCB Olinda API (Banco Central) — datas oficiais Copom, Selic, IPCA
-//   - Calendário Copom: agenda fixa do ano inteiro
-// EUA:
-//   - ForexFactory — calendário com forecast/actual/previous
+// Estratégia primária: Investing.com endpoint AJAX getCalendarFilteredData
+//   - Retorna HTML com tabela de eventos parseável por regex
+//   - User-Agent + headers de navegador real pra evitar Cloudflare block
+//   - Suporte opcional a ScrapingBee se SCRAPINGBEE_API_KEY estiver configurada
 //
-// Todas as fontes são gratuitas, sem chave de API, sem rate limit formal.
-// Cache de 15min para reduzir requests.
+// Estratégia fallback: ForexFactory (caso Investing bloqueie totalmente)
+//
+// Cache: 15min entre requests pra reduzir chance de rate limit.
 // =============================================================================
 
 import { classifyEvent, calculateBias } from './impactDb.js';
@@ -21,352 +21,263 @@ let cache = {
 };
 
 // ============================================================
-// FONTE 1: BCB OLINDA (Brasil — calendário macro oficial)
+// ESTRATÉGIA 1+2: INVESTING.COM direto + via ScrapingBee
 // ============================================================
-// API pública sem chave: https://olinda.bcb.gov.br/
+// Códigos de país: 5 = USA, 32 = Brazil
+// Códigos de importância: 1 = low, 2 = medium, 3 = high
+// timeZone=12 = America/Sao_Paulo
 
-const BCB_BASE = 'https://olinda.bcb.gov.br/olinda/servico';
+const INVESTING_URL = 'https://www.investing.com/economic-calendar/Service/getCalendarFilteredData';
+
+function buildInvestingBody() {
+  const params = new URLSearchParams();
+  params.append('country[]', '5');   // USA
+  params.append('country[]', '32');  // Brazil
+  params.append('importance[]', '2');
+  params.append('importance[]', '3');
+  params.append('timeZone', '12');   // São Paulo
+  params.append('timeFilter', 'timeRemain');
+  params.append('currentTab', 'thisWeek');
+  params.append('limit_from', '0');
+  return params.toString();
+}
+
+// Headers de navegador real — TENTAR ao máximo parecer com um Chrome legítimo
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'Accept': '*/*',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+  'X-Requested-With': 'XMLHttpRequest',
+  'Origin': 'https://br.investing.com',
+  'Referer': 'https://br.investing.com/economic-calendar/',
+  'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="121", "Google Chrome";v="121"',
+  'Sec-Ch-Ua-Mobile': '?0',
+  'Sec-Ch-Ua-Platform': '"Windows"',
+  'Sec-Fetch-Dest': 'empty',
+  'Sec-Fetch-Mode': 'cors',
+  'Sec-Fetch-Site': 'same-site',
+  'Connection': 'keep-alive'
+};
 
 /**
- * Datas oficiais do Copom para o ano corrente.
- * BCB publica o calendário anual de reuniões.
+ * Tenta acessar o endpoint AJAX direto do Investing.com.
  */
-async function fetchCopomCalendar() {
-  // O BCB publica o calendário em https://www.bcb.gov.br/controleinflacao/calendarioreunioescopom
-  // O JSON está em: /Expectativas/versao/v1/odata/ExpectativasMercadoSelic
-  // mas isso é expectativa, não calendário. Em vez disso usamos o endpoint público:
-  const year = new Date().getFullYear();
-  const url = `${BCB_BASE}/CalendarioMPC/versao/v1/odata/Calendario?$format=json&$filter=year(DataReuniao)%20eq%20${year}`;
+async function fetchInvestingDirect() {
+  const res = await fetch(INVESTING_URL, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20000),
+    headers: BROWSER_HEADERS,
+    body: buildInvestingBody()
+  });
 
-  try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  // Pode vir JSON com { data: '<html>' } OU HTML direto
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('json')) {
     const json = await res.json();
-    return json.value || [];
+    return json.data || '';
+  }
+  return await res.text();
+}
+
+/**
+ * Acessa via ScrapingBee (proxy residencial + bypass Cloudflare).
+ * Só funciona se SCRAPINGBEE_API_KEY estiver configurada.
+ * https://www.scrapingbee.com/
+ */
+async function fetchInvestingViaScrapingBee() {
+  const apiKey = process.env.SCRAPINGBEE_API_KEY;
+  if (!apiKey) {
+    throw new Error('SCRAPINGBEE_API_KEY não configurada');
+  }
+
+  const targetUrl = INVESTING_URL;
+  const body = buildInvestingBody();
+
+  // ScrapingBee POST: passa o URL alvo + headers customizados via query params
+  const sbUrl = new URL('https://app.scrapingbee.com/api/v1/');
+  sbUrl.searchParams.set('api_key', apiKey);
+  sbUrl.searchParams.set('url', targetUrl);
+  sbUrl.searchParams.set('render_js', 'false');
+  sbUrl.searchParams.set('premium_proxy', 'true');     // proxy residencial
+  sbUrl.searchParams.set('country_code', 'br');
+  sbUrl.searchParams.set('forward_headers', 'true');
+
+  const res = await fetch(sbUrl.toString(), {
+    method: 'POST',
+    signal: AbortSignal.timeout(45000),
+    headers: {
+      ...BROWSER_HEADERS,
+      'Spb-Origin': 'https://br.investing.com',
+      'Spb-Referer': 'https://br.investing.com/economic-calendar/'
+    },
+    body
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`ScrapingBee HTTP ${res.status}: ${errText.slice(0, 100)}`);
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('json')) {
+    const json = await res.json();
+    return json.data || '';
+  }
+  return await res.text();
+}
+
+/**
+ * Parser do HTML de eventos do Investing.com.
+ * Cada evento vem como <tr id="eventRowId_XXXXX" data-event-datetime="..." ...>
+ */
+function parseInvestingHTML(html) {
+  if (!html || typeof html !== 'string') return [];
+
+  const events = [];
+
+  // Regex pra encontrar cada <tr> de evento
+  const trRegex = /<tr[^>]*?id="eventRowId_(\d+)"[^>]*?data-event-datetime="([^"]+)"[^>]*>([\s\S]*?)<\/tr>/g;
+  let match;
+
+  while ((match = trRegex.exec(html)) !== null) {
+    const [, eventId, datetimeStr, content] = match;
+
+    try {
+      // País / moeda
+      const flagMatch = content.match(/<span[^>]*?class="[^"]*?ceFlags\s+([A-Z]{2,3})[^"]*"/);
+      const countryCode = flagMatch?.[1] || '';
+
+      const country = countryCode === 'US' ? 'US'
+                    : countryCode === 'BR' ? 'BR'
+                    : null;
+      if (!country) continue;
+
+      // Importância (estrelas)
+      let stars = 0;
+      const importanceCell = content.match(/data-img_key="bull(\d)"/);
+      if (importanceCell) {
+        stars = parseInt(importanceCell[1], 10);
+      } else {
+        const bullMatches = content.match(/grayFullBullishIcon/g);
+        if (bullMatches) stars = bullMatches.length;
+      }
+      if (stars < 2) continue;
+
+      // Nome do evento
+      const eventNameMatch = content.match(/<td[^>]*?class="[^"]*?event[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/);
+      let eventName = (eventNameMatch?.[1] || '').replace(/\s+/g, ' ').trim();
+      if (!eventName) {
+        const eventTextMatch = content.match(/<td[^>]*?class="[^"]*?event[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+        if (eventTextMatch) {
+          eventName = eventTextMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        }
+      }
+      if (!eventName) continue;
+
+      // Actual / Forecast / Previous
+      const actualMatch = content.match(/<td[^>]*?class="[^"]*?\bact\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+      const forecastMatch = content.match(/<td[^>]*?class="[^"]*?\bfore\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+      const previousMatch = content.match(/<td[^>]*?class="[^"]*?\bprev\b[^"]*"[^>]*>([\s\S]*?)<\/td>/);
+
+      const cleanCell = (s) => {
+        if (!s) return null;
+        const text = s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').trim();
+        if (!text || text === '-' || text === '—' || text === '&nbsp;') return null;
+        return text;
+      };
+
+      const actual = cleanCell(actualMatch?.[1]);
+      const forecast = cleanCell(forecastMatch?.[1]);
+      const previous = cleanCell(previousMatch?.[1]);
+
+      // datetime "2026-05-12 09:00:00" → ISO com offset -03:00
+      const datetimeISO = datetimeStr.includes('T')
+        ? datetimeStr
+        : datetimeStr.replace(' ', 'T') + '-03:00';
+
+      const countryName = country === 'US' ? 'United States' : 'Brazil';
+      const classification = classifyEvent(eventName, countryName);
+      const biasInfo = calculateBias(actual, forecast, previous, classification);
+
+      events.push({
+        id: `inv_${eventId}`,
+        datetime: datetimeISO,
+        country,
+        countryName,
+        event: eventName,
+        reference: '',
+        stars,
+        actual,
+        forecast,
+        previous,
+        unit: '',
+        bias: biasInfo.bias,
+        surprise: biasInfo.surprise,
+        magnitude: biasInfo.magnitude,
+        direction: classification?.direction || 'neutral',
+        typicalRange: classification?.typicalRange || [],
+        notes: classification?.notes || '',
+        released: actual != null,
+        source: 'investing'
+      });
+    } catch (_) {
+      continue;
+    }
+  }
+
+  return events;
+}
+
+async function fetchFromInvesting() {
+  let html;
+  let attemptedStrategies = [];
+
+  // Estratégia 1: direto do Investing.com
+  try {
+    console.log('[CALENDAR] Tentando Investing.com direto...');
+    html = await fetchInvestingDirect();
+    attemptedStrategies.push('direct');
+    if (html && html.length > 1000) {
+      const events = parseInvestingHTML(html);
+      if (events.length > 0) {
+        return { events, strategy: 'direct' };
+      }
+      console.log('[CALENDAR] Investing direto retornou HTML mas sem eventos extraídos');
+    }
   } catch (err) {
-    // Fallback: calendário hardcoded do Copom do ano corrente
-    // (BCB anuncia em janeiro, são 8 reuniões por ano)
-    return getCopomFallback(year);
-  }
-}
-
-/**
- * Calendário hardcoded do Copom — usado se a API do BCB não responder.
- * Atualizar manualmente em janeiro de cada ano.
- */
-function getCopomFallback(year) {
-  // Calendário oficial Copom 2026 (divulgado pelo BCB em jan/2026)
-  // Reuniões sempre terça/quarta, decisão divulgada na quarta às 18h30 BRT
-  const calendar2026 = [
-    { DataReuniao: '2026-01-28T18:30:00-03:00', Reuniao: '273' },
-    { DataReuniao: '2026-03-18T18:30:00-03:00', Reuniao: '274' },
-    { DataReuniao: '2026-05-06T18:30:00-03:00', Reuniao: '275' },
-    { DataReuniao: '2026-06-17T18:30:00-03:00', Reuniao: '276' },
-    { DataReuniao: '2026-07-29T18:30:00-03:00', Reuniao: '277' },
-    { DataReuniao: '2026-09-16T18:30:00-03:00', Reuniao: '278' },
-    { DataReuniao: '2026-10-28T18:30:00-03:00', Reuniao: '279' },
-    { DataReuniao: '2026-12-09T18:30:00-03:00', Reuniao: '280' }
-  ];
-  return calendar2026.filter(r => r.DataReuniao.startsWith(String(year)));
-}
-
-/**
- * Calendário de divulgação do IPCA — IBGE divulga aproximadamente
- * todo dia 10 de cada mês (referência ao mês anterior).
- */
-function getIPCACalendar(year) {
-  // Datas de divulgação do IPCA em 2026 (IBGE divulga sempre por volta do dia 10, 9h)
-  // Fonte: https://www.ibge.gov.br/explica/inflacao.php (calendário oficial)
-  const calendar2026 = [
-    { date: '2026-01-13T09:00:00-03:00', reference: 'dez/2025' },
-    { date: '2026-02-11T09:00:00-03:00', reference: 'jan/2026' },
-    { date: '2026-03-12T09:00:00-03:00', reference: 'fev/2026' },
-    { date: '2026-04-10T09:00:00-03:00', reference: 'mar/2026' },
-    { date: '2026-05-12T09:00:00-03:00', reference: 'abr/2026' },
-    { date: '2026-06-10T09:00:00-03:00', reference: 'mai/2026' },
-    { date: '2026-07-10T09:00:00-03:00', reference: 'jun/2026' },
-    { date: '2026-08-12T09:00:00-03:00', reference: 'jul/2026' },
-    { date: '2026-09-10T09:00:00-03:00', reference: 'ago/2026' },
-    { date: '2026-10-09T09:00:00-03:00', reference: 'set/2026' },
-    { date: '2026-11-11T09:00:00-03:00', reference: 'out/2026' },
-    { date: '2026-12-10T09:00:00-03:00', reference: 'nov/2026' }
-  ];
-  return calendar2026.filter(r => r.date.startsWith(String(year)));
-}
-
-/**
- * Calendário IPCA-15 (prévia da inflação) — IBGE divulga por volta do dia 22.
- */
-function getIPCA15Calendar(year) {
-  const calendar2026 = [
-    { date: '2026-01-23T09:00:00-03:00', reference: 'jan/2026' },
-    { date: '2026-02-25T09:00:00-03:00', reference: 'fev/2026' },
-    { date: '2026-03-25T09:00:00-03:00', reference: 'mar/2026' },
-    { date: '2026-04-24T09:00:00-03:00', reference: 'abr/2026' },
-    { date: '2026-05-26T09:00:00-03:00', reference: 'mai/2026' },
-    { date: '2026-06-24T09:00:00-03:00', reference: 'jun/2026' },
-    { date: '2026-07-23T09:00:00-03:00', reference: 'jul/2026' },
-    { date: '2026-08-25T09:00:00-03:00', reference: 'ago/2026' },
-    { date: '2026-09-24T09:00:00-03:00', reference: 'set/2026' },
-    { date: '2026-10-23T09:00:00-03:00', reference: 'out/2026' },
-    { date: '2026-11-25T09:00:00-03:00', reference: 'nov/2026' },
-    { date: '2026-12-19T09:00:00-03:00', reference: 'dez/2026' }
-  ];
-  return calendar2026.filter(r => r.date.startsWith(String(year)));
-}
-
-/**
- * Boletim Focus — BCB divulga toda segunda às 8h25
- */
-function getFocusCalendar(year) {
-  const events = [];
-  const start = new Date(year, 0, 1);
-  const end = new Date(year, 11, 31);
-  const d = new Date(start);
-  // Pula para a primeira segunda-feira do ano
-  while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
-  while (d <= end) {
-    const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T08:25:00-03:00`;
-    events.push({ date: iso });
-    d.setDate(d.getDate() + 7);
-  }
-  return events;
-}
-
-/**
- * Busca a expectativa Focus mais recente pra cada indicador.
- * O Focus publica expectativa MENSAL do IPCA — exatamente o que precisamos
- * pra comparar com o release do IBGE (que também é mensal).
- */
-async function fetchLatestFocusExpectations() {
-  const out = { ipcaMensal: null, ipcaAnual: null, selic: null };
-
-  // Expectativa MENSAL do IPCA (próxima divulgação)
-  // Usa ExpectativasMercadoTop5Mensais que dá direto a mediana dos top 5 analistas
-  try {
-    const nowYear = new Date().getFullYear();
-    const nowMonth = String(new Date().getMonth() + 1).padStart(2, '0');
-    const dataRef = `${nowMonth}/${nowYear}`;
-    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoTop5Mensais?$top=20&$orderby=Data%20desc&$format=json&$filter=Indicador%20eq%20%27IPCA%27%20and%20DataReferencia%20eq%20%27${encodeURIComponent(dataRef)}%27`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const current = json.value?.[0];
-      if (current) out.ipcaMensal = current.Mediana;
-    }
-  } catch (_) {}
-
-  // Expectativa ANUAL (acumulado 12 meses) também pra contexto
-  try {
-    const nowYear = new Date().getFullYear();
-    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=10&$orderby=Data%20desc&$format=json&$filter=Indicador%20eq%20%27IPCA%27%20and%20DataReferencia%20eq%20%27${nowYear}%27`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const current = json.value?.[0];
-      if (current) out.ipcaAnual = current.Mediana;
-    }
-  } catch (_) {}
-
-  // Expectativa da Selic
-  try {
-    const nowYear = new Date().getFullYear();
-    const url = `${BCB_BASE}/Expectativas/versao/v1/odata/ExpectativasMercadoSelic?$top=10&$orderby=Data%20desc&$format=json&$filter=DataReferencia%20eq%20%27${nowYear}%27`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const current = json.value?.[0];
-      if (current) out.selic = current.Mediana;
-    }
-  } catch (_) {}
-
-  return out;
-}
-
-/**
- * Busca o último valor publicado para preencher "previous".
- *  - Selic anual: série SGS 432
- *  - IPCA mensal: série SGS 433 (TAXA mensal, comparável com o release)
- *  - IPCA acumulado 12m: série SGS 13522 (pra contexto)
- */
-async function fetchLatestBCBData() {
-  const out = { selic: null, ipcaMensal: null, ipcaAnual: null };
-
-  // Selic
-  try {
-    const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json', {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (r.ok) {
-      const data = await r.json();
-      if (Array.isArray(data) && data[0]) out.selic = data[0].valor;
-    }
-  } catch (_) {}
-
-  // IPCA mensal — série 433 (esse é o que sai mensalmente e é o que o operador compara)
-  try {
-    const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/1?formato=json', {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (r.ok) {
-      const data = await r.json();
-      if (Array.isArray(data) && data[0]) out.ipcaMensal = data[0].valor;
-    }
-  } catch (_) {}
-
-  // IPCA acumulado 12 meses — série 13522 (pra contexto)
-  try {
-    const r = await fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/1?formato=json', {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'Accept': 'application/json' }
-    });
-    if (r.ok) {
-      const data = await r.json();
-      if (Array.isArray(data) && data[0]) out.ipcaAnual = data[0].valor;
-    }
-  } catch (_) {}
-
-  return out;
-}
-
-/**
- * Constrói os eventos brasileiros a partir dos calendários + dados reais.
- */
-async function fetchFromBR() {
-  const year = new Date().getFullYear();
-  const events = [];
-
-  // Busca dados reais em paralelo
-  const [copom, latest, focus] = await Promise.all([
-    fetchCopomCalendar(),
-    fetchLatestBCBData(),
-    fetchLatestFocusExpectations()
-  ]);
-
-  // === COPOM (3 estrelas) ===
-  for (const reuniao of copom) {
-    const datetime = reuniao.DataReuniao || reuniao.date;
-    if (!datetime) continue;
-    const eventName = 'Copom Interest Rate Decision';
-    const classification = classifyEvent(eventName, 'Brazil');
-    events.push({
-      id: `bcb_copom_${datetime}`,
-      datetime,
-      country: 'BR',
-      countryName: 'Brazil',
-      event: 'Decisão Copom (Taxa Selic)',
-      reference: reuniao.Reuniao ? `Reunião ${reuniao.Reuniao}` : '',
-      stars: 3,
-      actual: null,
-      forecast: null,
-      previous: latest.selic ? `${latest.selic}%` : null,
-      unit: '',
-      bias: 'PENDING',
-      surprise: 0,
-      magnitude: 'unknown',
-      direction: classification?.direction || 'dovish_good',
-      typicalRange: classification?.typicalRange || [400, 1200],
-      notes: 'Decisão do Copom. Corte = bom pro WIN, manutenção/alta = ruim. Comunicado importa muito.',
-      released: false,
-      source: 'bcb'
-    });
+    console.error(`[CALENDAR] Investing direto falhou: ${err.message}`);
   }
 
-  // === IPCA (3 estrelas) ===
-  for (const item of getIPCACalendar(year)) {
-    const classification = classifyEvent('IPCA Inflation Rate YoY', 'Brazil');
-    events.push({
-      id: `ibge_ipca_${item.date}`,
-      datetime: item.date,
-      country: 'BR',
-      countryName: 'Brazil',
-      event: 'IPCA (Inflação Mensal)',
-      reference: item.reference,
-      stars: 3,
-      actual: null,
-      forecast: focus.ipcaMensal != null ? `${focus.ipcaMensal}%` : null,
-      previous: latest.ipcaMensal != null ? `${latest.ipcaMensal}%` : null,
-      unit: '',
-      bias: 'PENDING',
-      surprise: 0,
-      magnitude: 'unknown',
-      direction: classification?.direction || 'hawkish_bad',
-      typicalRange: classification?.typicalRange || [200, 600],
-      notes: 'IPCA acima do esperado = BC pode adiar cortes = ruim pro WIN.',
-      released: false,
-      source: 'ibge'
-    });
+  // Estratégia 2: via ScrapingBee (se configurado)
+  if (process.env.SCRAPINGBEE_API_KEY) {
+    try {
+      console.log('[CALENDAR] Tentando Investing via ScrapingBee...');
+      html = await fetchInvestingViaScrapingBee();
+      attemptedStrategies.push('scrapingbee');
+      if (html && html.length > 1000) {
+        const events = parseInvestingHTML(html);
+        if (events.length > 0) {
+          return { events, strategy: 'scrapingbee' };
+        }
+      }
+    } catch (err) {
+      console.error(`[CALENDAR] Investing via ScrapingBee falhou: ${err.message}`);
+    }
   }
 
-  // === IPCA-15 (2 estrelas) ===
-  for (const item of getIPCA15Calendar(year)) {
-    events.push({
-      id: `ibge_ipca15_${item.date}`,
-      datetime: item.date,
-      country: 'BR',
-      countryName: 'Brazil',
-      event: 'IPCA-15 (Prévia da Inflação)',
-      reference: item.reference,
-      stars: 2,
-      actual: null,
-      forecast: null,
-      previous: null,
-      unit: '',
-      bias: 'PENDING',
-      surprise: 0,
-      magnitude: 'unknown',
-      direction: 'hawkish_bad',
-      typicalRange: [100, 300],
-      notes: 'Prévia do IPCA. Movimenta menos mas serve de termômetro pra a inflação cheia.',
-      released: false,
-      source: 'ibge'
-    });
-  }
-
-  // === BOLETIM FOCUS (2 estrelas, semanal segunda 8h25) ===
-  for (const item of getFocusCalendar(year)) {
-    events.push({
-      id: `bcb_focus_${item.date}`,
-      datetime: item.date,
-      country: 'BR',
-      countryName: 'Brazil',
-      event: 'Boletim Focus',
-      reference: 'Expectativas do mercado',
-      stars: 2,
-      actual: null,
-      forecast: null,
-      previous: null,
-      unit: '',
-      bias: 'PENDING',
-      surprise: 0,
-      magnitude: 'unknown',
-      direction: 'neutral',
-      typicalRange: [50, 150],
-      notes: 'Relatório Focus do BCB. Move quando há revisão grande nas expectativas.',
-      released: false,
-      source: 'bcb'
-    });
-  }
-
-  return events;
+  throw new Error(`Todas estratégias Investing falharam (${attemptedStrategies.join(', ') || 'nenhuma tentada'})`);
 }
 
 // ============================================================
-// FONTE 2: FOREXFACTORY (EUA)
+// FALLBACK: FOREXFACTORY (caso Investing falhe totalmente)
 // ============================================================
 
 const FF_THIS_WEEK_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
@@ -437,26 +348,25 @@ function normalizeFFEvent(item) {
   };
 }
 
-async function fetchFromUS() {
+async function fetchFromForexFactory() {
   const events = [];
   try {
     const data = await fetchForexFactory(FF_THIS_WEEK_URL);
     if (Array.isArray(data)) {
       for (const item of data) {
         const norm = normalizeFFEvent(item);
-        // Filtra só EUA (o BR vem do BCB+IBGE)
-        if (norm && norm.country === 'US') events.push(norm);
+        if (norm) events.push(norm);
       }
     }
   } catch (err) {
-    console.error('[ForexFactory thisweek] Erro:', err.message);
+    throw new Error(`thisweek: ${err.message}`);
   }
   try {
     const data = await fetchForexFactory(FF_NEXT_WEEK_URL);
     if (Array.isArray(data)) {
       for (const item of data) {
         const norm = normalizeFFEvent(item);
-        if (norm && norm.country === 'US') events.push(norm);
+        if (norm) events.push(norm);
       }
     }
   } catch (_) { /* não fatal */ }
@@ -475,37 +385,37 @@ export async function fetchTodayAndTomorrow(apiKey /* compat */) {
     return filterUpcoming(cache.events);
   }
 
-  let allEvents = [];
-
-  // Brasil: BCB + IBGE em paralelo, com fallback de hardcoded
+  // Investing.com primeiro
   try {
-    const brEvents = await fetchFromBR();
-    allEvents.push(...brEvents);
-    console.log(`[CALENDAR] BR (BCB+IBGE): ${brEvents.length} eventos`);
+    const { events, strategy } = await fetchFromInvesting();
+    cache = { events, fetchedAt: now, source: `investing-${strategy}` };
+    console.log(`[CALENDAR] ✅ Investing.com (${strategy}): ${events.length} eventos. Próx em ${CACHE_TTL_MS / 60000}min.`);
+    return filterUpcoming(events);
   } catch (err) {
-    console.error('[CALENDAR] BR falhou:', err.message);
+    console.error(`[CALENDAR] ❌ Investing falhou totalmente: ${err.message}`);
   }
 
-  // EUA: ForexFactory
+  // Fallback: ForexFactory
   try {
-    const usEvents = await fetchFromUS();
-    allEvents.push(...usEvents);
-    console.log(`[CALENDAR] US (ForexFactory): ${usEvents.length} eventos`);
+    console.log('[CALENDAR] Usando fallback ForexFactory...');
+    const events = await fetchFromForexFactory();
+    if (events.length > 0) {
+      cache = { events, fetchedAt: now, source: 'forexfactory' };
+      console.log(`[CALENDAR] ⚠️ Fallback ForexFactory: ${events.length} eventos`);
+      return filterUpcoming(events);
+    }
   } catch (err) {
-    console.error('[CALENDAR] US falhou:', err.message);
+    console.error(`[CALENDAR] ForexFactory também falhou: ${err.message}`);
   }
 
-  if (allEvents.length > 0) {
-    cache = { events: allEvents, fetchedAt: now, source: 'bcb+ibge+forexfactory' };
-    console.log(`[CALENDAR] TOTAL: ${allEvents.length} eventos. Próx. atualização em ${CACHE_TTL_MS / 60000}min.`);
-    return filterUpcoming(allEvents);
-  }
-
+  // Usa cache antigo se houver
   if (cache.events) {
-    console.log('[CALENDAR] Falha total, usando cache antigo');
+    const ageMin = Math.round(cacheAge / 60000);
+    console.log(`[CALENDAR] Todas fontes falharam, usando cache de ${ageMin}min`);
     return filterUpcoming(cache.events);
   }
 
+  console.error('[CALENDAR] SEM FONTE E SEM CACHE');
   return [];
 }
 
@@ -527,4 +437,16 @@ export function formatDate(date) {
 
 export async function fetchCalendar(dateFrom, dateTo, apiKey) {
   return fetchTodayAndTomorrow(apiKey);
+}
+
+/**
+ * Retorna info sobre a fonte atual em uso (pra UI mostrar status).
+ */
+export function getSourceInfo() {
+  return {
+    source: cache.source,
+    eventsCount: cache.events ? cache.events.length : 0,
+    cacheAgeMs: cache.fetchedAt ? Date.now() - cache.fetchedAt : null,
+    scrapingBeeConfigured: !!process.env.SCRAPINGBEE_API_KEY
+  };
 }
