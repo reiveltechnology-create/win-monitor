@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
 import { fetchTodayAndTomorrow } from './calendar.js';
+import { generateAnalysis, getCachedAnalysis, clearAnalysisCache } from './analyze.js';
 
 dotenv.config();
 
@@ -176,6 +177,10 @@ function eventsInRange(fromISO, toISO) {
     .sort((a, b) => a.datetime.localeCompare(b.datetime));
 }
 
+function findEventById(eventId) {
+  return store[eventId] || null;
+}
+
 app.get('/api/events/today', (req, res) => {
   const now = new Date();
   const start = new Date(now); start.setHours(0, 0, 0, 0);
@@ -211,6 +216,40 @@ app.get('/api/events', (req, res) => {
   }
 
   res.json(eventsInRange(start.toISOString(), end.toISOString()));
+});
+
+// ============ ANÁLISE COM CLAUDE API ============
+
+// Retorna análise em cache (sem chamar Claude) — útil pra restaurar UI ao recarregar
+app.get('/api/analyze/:eventId', (req, res) => {
+  const cached = getCachedAnalysis(req.params.eventId);
+  if (cached) {
+    res.json({ analysis: cached, cached: true });
+  } else {
+    res.json({ analysis: null, cached: false });
+  }
+});
+
+// Gera nova análise (chama Claude API). Body opcional: { force: true } pra ignorar cache
+app.post('/api/analyze/:eventId', async (req, res) => {
+  const eventId = req.params.eventId;
+  const ev = findEventById(eventId);
+  if (!ev) {
+    return res.status(404).json({ error: 'Evento não encontrado' });
+  }
+  if (!ev.released && !ev.actual) {
+    return res.status(400).json({ error: 'Evento ainda não foi liberado (sem dados pra analisar)' });
+  }
+
+  if (req.body && req.body.force) {
+    clearAnalysisCache(eventId);
+  }
+
+  const result = await generateAnalysis(ev, process.env.ANTHROPIC_API_KEY);
+  if (result.error) {
+    return res.status(500).json(result);
+  }
+  res.json(result);
 });
 
 app.post('/api/poll', async (req, res) => {

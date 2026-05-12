@@ -288,6 +288,128 @@
   .event-row .actual.bull-val { color: var(--green); font-size: 13px; }
   .event-row .actual.bear-val { color: var(--red); font-size: 13px; }
 
+  /* ============ ANÁLISE IA ============ */
+  .ai-cta {
+    margin-top: 12px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .ai-btn {
+    background: linear-gradient(90deg, var(--bg-elev-2), var(--bg-elev));
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .ai-btn:hover:not(:disabled) {
+    background: var(--green);
+    color: var(--bg);
+  }
+  .ai-btn:disabled {
+    opacity: 0.55;
+    cursor: wait;
+    border-color: var(--text-dim);
+    color: var(--text-dim);
+  }
+  .ai-hint {
+    font-size: 10px;
+    color: var(--text-mute);
+    letter-spacing: 0.04em;
+  }
+
+  .ai-analysis {
+    margin-top: 14px;
+    padding: 18px 22px;
+    background: #0d1117;
+    border: 1px solid var(--line-bright);
+    border-left: 4px solid var(--green);
+    border-radius: 3px;
+    font-size: 14px;
+    line-height: 1.75;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  .ai-analysis-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 12px; margin-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 700;
+    font-family: var(--mono);
+  }
+  .ai-refresh-btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    padding: 4px 10px;
+    cursor: pointer;
+    border-radius: 2px;
+    text-transform: uppercase;
+  }
+  .ai-refresh-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .ai-analysis-content {
+    color: var(--text);
+    font-size: 13.5px;
+  }
+  .ai-analysis-content table {
+    margin: 8px 0;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .ai-analysis-content th,
+  .ai-analysis-content td {
+    border: 1px solid var(--line);
+    padding: 6px 14px;
+    text-align: left;
+  }
+  .ai-analysis-content th {
+    background: var(--bg-elev);
+    color: var(--text-dim);
+  }
+  .ai-error {
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: rgba(255, 56, 85, 0.06);
+    border-left: 3px solid var(--red);
+    color: var(--red);
+    font-size: 11px;
+  }
+  .ai-spinner {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border: 2px solid var(--green);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .ai-disclaimer {
+    margin-top: 10px;
+    font-size: 9px;
+    color: var(--text-mute);
+    letter-spacing: 0.04em;
+    font-style: italic;
+  }
+
   /* ============ LOG ============ */
   .log {
     background: var(--bg-elev);
@@ -1153,6 +1275,15 @@
             </div>
           </div>
           ${impactBlock}
+          ${ev.released ? `
+            <div class="ai-cta">
+              <button class="ai-btn" data-ai-trigger="${ev.id}">
+                🤖 GERAR ANÁLISE IA
+              </button>
+              <span class="ai-hint">análise institucional completa via Claude</span>
+            </div>
+          ` : ''}
+          <div class="ai-slot" data-ai-slot="${ev.id}"></div>
           ${ev.notes ? `<div class="event-notes">${ev.notes}</div>` : ''}
         </div>
       `;
@@ -1160,6 +1291,7 @@
 
     document.getElementById('eventsCount').textContent = state.events.length;
     updateKPIs();
+    if (typeof restoreAIAnalyses === 'function') restoreAIAnalyses();
   }
 
   function updateKPIs() {
@@ -1305,6 +1437,162 @@
     });
   }
   setupRangeFilter();
+
+  // ============ ANÁLISE IA — handlers ============
+  // Cache local de análises já carregadas pra restaurar ao re-renderizar
+  state.aiAnalysisCache = {};
+
+  // Delegação de evento — pega clique em qualquer botão "Gerar análise IA"
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-ai-trigger]');
+    if (btn) {
+      const eventId = btn.dataset.aiTrigger;
+      await requestAnalysis(eventId, false);
+      return;
+    }
+    const refresh = e.target.closest('[data-ai-refresh]');
+    if (refresh) {
+      const eventId = refresh.dataset.aiRefresh;
+      await requestAnalysis(eventId, true);
+      return;
+    }
+  });
+
+  // Sanitiza HTML pra evitar XSS na análise do Claude
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  // Converte tabela markdown simples ( | col | col | ) pra <table>
+  function renderMarkdownTables(text) {
+    const lines = text.split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // Detecta início de tabela: linha com | e próxima linha com separator |---|
+      if (line.trim().startsWith('|') && i + 1 < lines.length &&
+          /^\s*\|[\s\|:\-]+\|\s*$/.test(lines[i + 1])) {
+        const tableLines = [line];
+        i += 2; // pula header e separator
+        while (i < lines.length && lines[i].trim().startsWith('|')) {
+          tableLines.push(lines[i]);
+          i++;
+        }
+        // Renderiza tabela
+        const rows = tableLines.map(l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()));
+        const header = rows.shift();
+        let html = '<table><thead><tr>';
+        for (const h of header) html += `<th>${escapeHtml(h)}</th>`;
+        html += '</tr></thead><tbody>';
+        for (const row of rows) {
+          html += '<tr>';
+          for (const cell of row) html += `<td>${escapeHtml(cell)}</td>`;
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+        out.push(html);
+      } else {
+        out.push(escapeHtml(line));
+        i++;
+      }
+    }
+    return out.join('\n');
+  }
+
+  async function requestAnalysis(eventId, force) {
+    const slot = document.querySelector(`[data-ai-slot="${CSS.escape(eventId)}"]`);
+    const btn  = document.querySelector(`[data-ai-trigger="${CSS.escape(eventId)}"]`);
+    if (!slot) return;
+
+    // Estado de loading
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="ai-spinner"></span> ANALISANDO...';
+    }
+    slot.innerHTML = `
+      <div class="ai-analysis" style="opacity:0.7">
+        <div class="ai-analysis-header">
+          <span><span class="ai-spinner"></span> Gerando análise institucional...</span>
+        </div>
+        <div class="ai-analysis-content" style="color: var(--text-dim); font-size: 12px;">
+          O Claude está processando os dados do release e construindo a análise.
+          Isso leva entre 5 e 15 segundos.
+        </div>
+      </div>
+    `;
+
+    try {
+      const res = await fetch(`/api/analyze/${encodeURIComponent(eventId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: !!force })
+      });
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        slot.innerHTML = `
+          <div class="ai-error">
+            <strong>Erro ao gerar análise:</strong><br>
+            ${escapeHtml(data.error || 'Erro desconhecido')}<br><br>
+            <em>Verifique se a ANTHROPIC_API_KEY está configurada no servidor.</em>
+          </div>
+        `;
+        return;
+      }
+
+      state.aiAnalysisCache[eventId] = data.analysis;
+      const contentHtml = renderMarkdownTables(data.analysis);
+      const cachedTag = data.cached ? '<span style="font-size:9px; color: var(--text-mute);">(do cache)</span>' : '';
+      slot.innerHTML = `
+        <div class="ai-analysis">
+          <div class="ai-analysis-header">
+            <span>🤖 ANÁLISE INSTITUCIONAL · Claude Sonnet 4.6 ${cachedTag}</span>
+            <button class="ai-refresh-btn" data-ai-refresh="${escapeHtml(eventId)}">↻ Refazer</button>
+          </div>
+          <div class="ai-analysis-content">${contentHtml}</div>
+          <div class="ai-disclaimer">⚠️ Análise gerada por IA. Confirme com sua leitura de gráfico antes de operar.</div>
+        </div>
+      `;
+      logEvent('SYS', `Análise IA gerada para ${eventId.slice(0, 40)}`);
+    } catch (err) {
+      slot.innerHTML = `
+        <div class="ai-error">
+          <strong>Falha de rede:</strong> ${escapeHtml(err.message)}
+        </div>
+      `;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '🤖 GERAR ANÁLISE IA';
+      }
+    }
+  }
+
+  // Restaura análises em cache ao re-renderizar a lista
+  // (chamado depois de cada renderEvents)
+  function restoreAIAnalyses() {
+    for (const [eventId, analysis] of Object.entries(state.aiAnalysisCache)) {
+      const slot = document.querySelector(`[data-ai-slot="${CSS.escape(eventId)}"]`);
+      if (!slot || slot.innerHTML.trim()) continue;
+      const contentHtml = renderMarkdownTables(analysis);
+      slot.innerHTML = `
+        <div class="ai-analysis">
+          <div class="ai-analysis-header">
+            <span>🤖 ANÁLISE INSTITUCIONAL · Claude Sonnet 4.6</span>
+            <button class="ai-refresh-btn" data-ai-refresh="${escapeHtml(eventId)}">↻ Refazer</button>
+          </div>
+          <div class="ai-analysis-content">${contentHtml}</div>
+          <div class="ai-disclaimer">⚠️ Análise gerada por IA. Confirme com sua leitura de gráfico antes de operar.</div>
+        </div>
+      `;
+    }
+  }
 
   // ============ SSE ============
   function connectSSE() {
