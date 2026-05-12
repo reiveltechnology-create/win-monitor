@@ -410,6 +410,69 @@
     font-style: italic;
   }
 
+  /* ============ STATUS DA CHAVE CLAUDE ============ */
+  .claude-status {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 2px;
+    border: 1px solid;
+  }
+  .claude-status-ok {
+    color: var(--green);
+    border-color: var(--green);
+    background: rgba(0, 255, 136, 0.06);
+  }
+  .claude-status-ok::before { content: '● '; }
+  .claude-status-error {
+    color: var(--red);
+    border-color: var(--red);
+    background: rgba(255, 56, 85, 0.06);
+  }
+  .claude-status-error::before { content: '● '; }
+  .claude-status-none {
+    color: var(--text-dim);
+    border-color: var(--line-bright);
+  }
+  .claude-status-none::before { content: '○ '; }
+  .claude-status-testing {
+    color: var(--yellow);
+    border-color: var(--yellow);
+    background: rgba(255, 217, 61, 0.06);
+  }
+  .claude-status-testing::before { content: '◐ '; }
+  #cfgClaudeFeedback.ok { color: var(--green); }
+  #cfgClaudeFeedback.error { color: var(--red); }
+  #cfgClaudeFeedback.info { color: var(--text-dim); }
+
+  /* ============ INDICADOR IA NO HEADER ============ */
+  .ai-indicator {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 4px 10px;
+    border-radius: 2px;
+    border: 1px solid;
+    cursor: help;
+    user-select: none;
+  }
+  .ai-indicator-ok {
+    color: var(--green);
+    border-color: var(--green);
+    background: rgba(0, 255, 136, 0.05);
+  }
+  .ai-indicator-error {
+    color: var(--red);
+    border-color: var(--red);
+    background: rgba(255, 56, 85, 0.05);
+  }
+  .ai-indicator-none {
+    color: var(--text-mute);
+    border-color: var(--line-bright);
+  }
+
   /* ============ LOG ============ */
   .log {
     background: var(--bg-elev);
@@ -585,6 +648,7 @@
   <div class="status">
     <span id="connStatus"><span class="dot"></span>conectando...</span>
     <span id="clockNow">--:--:--</span>
+    <span id="aiIndicator" class="ai-indicator ai-indicator-none" title="Status da IA Claude">🤖 IA OFF</span>
     <button id="voiceBtn" class="voice-toggle">
       <span id="voiceIcon">◯</span>
       <span id="voiceLabel">VOZ OFF</span>
@@ -708,6 +772,24 @@
     <div class="preview-row">
       <button class="preview-btn" id="previewAlertBtn">▶ Testar som</button>
       <button class="preview-btn" id="previewVoiceBtn">▶ Testar voz</button>
+    </div>
+
+    <!-- ============ ANÁLISE IA — CHAVE CLAUDE ============ -->
+    <div class="field-group" style="margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px;">
+      <label style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <span>🤖 Análise IA (Claude API)</span>
+        <span id="cfgClaudeStatus" class="claude-status claude-status-none">verificando...</span>
+      </label>
+      <div style="font-size: 10px; color: var(--text-mute); margin-bottom: 8px;">
+        Obtenha sua chave em <span style="color: var(--green);">console.anthropic.com/settings/keys</span> · custo ~R$ 0,15 por análise
+      </div>
+      <input type="password" id="cfgClaudeKey" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false" />
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button class="preview-btn" id="testClaudeBtn">▶ Testar conexão</button>
+        <button class="preview-btn" id="saveClaudeBtn">💾 Salvar chave</button>
+        <button class="preview-btn" id="clearClaudeBtn" style="margin-left: auto; color: var(--red); border-color: var(--red);">🗑 Remover</button>
+      </div>
+      <div id="cfgClaudeFeedback" style="margin-top: 8px; font-size: 10px; min-height: 14px;"></div>
     </div>
 
     <div class="save-row">
@@ -908,6 +990,11 @@
     document.getElementById('cfgVolumeVal').textContent = Math.round(state.settings.volume * 100) + '%';
     document.getElementById('cfgAlertSound').value = state.settings.alertSound;
     document.getElementById('cfgAnnounceAhead').value = String(state.settings.announceAheadSec || 300);
+    // Limpa campo de chave (não pré-preenche por segurança)
+    document.getElementById('cfgClaudeKey').value = '';
+    document.getElementById('cfgClaudeFeedback').textContent = '';
+    document.getElementById('cfgClaudeFeedback').className = '';
+    refreshClaudeStatus();
     settingsModal.classList.add('open');
   });
 
@@ -916,6 +1003,141 @@
   });
   settingsModal.addEventListener('click', (e) => {
     if (e.target === settingsModal) settingsModal.classList.remove('open');
+  });
+
+  // ============ INDICADOR IA NO HEADER ============
+  async function updateAIIndicator() {
+    const el = document.getElementById('aiIndicator');
+    if (!el) return;
+    try {
+      const res = await fetch('/api/anthropic/status');
+      const data = await res.json();
+      if (!data.configured) {
+        el.className = 'ai-indicator ai-indicator-none';
+        el.textContent = '🤖 IA OFF';
+        el.title = 'Análise IA desativada — configure a chave em CONFIG';
+        return;
+      }
+      // Tem chave: marca como OK rapidamente, validação real só no modal
+      el.className = 'ai-indicator ai-indicator-ok';
+      el.textContent = '🤖 IA ON';
+      el.title = `Análise IA ativa · chave ${data.masked || ''}`;
+    } catch (_) {
+      el.className = 'ai-indicator ai-indicator-error';
+      el.textContent = '🤖 IA ERR';
+      el.title = 'Erro ao verificar status da IA';
+    }
+  }
+
+  // Atualiza ao carregar e a cada 60s
+  updateAIIndicator();
+  setInterval(updateAIIndicator, 60000);
+
+  // ============ HANDLERS DA CHAVE CLAUDE ============
+  async function refreshClaudeStatus() {
+    const badge = document.getElementById('cfgClaudeStatus');
+    badge.className = 'claude-status claude-status-testing';
+    badge.textContent = 'verificando...';
+    try {
+      const res = await fetch('/api/anthropic/status');
+      const data = await res.json();
+      if (!data.configured) {
+        badge.className = 'claude-status claude-status-none';
+        badge.textContent = 'NÃO CONFIGURADA';
+        return;
+      }
+      // Tem chave — testa se funciona
+      const test = await fetch('/api/anthropic/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      const tdata = await test.json();
+      if (tdata.ok) {
+        badge.className = 'claude-status claude-status-ok';
+        badge.textContent = `CONECTADA · ${data.masked || ''} · ${tdata.latencyMs}ms`;
+      } else {
+        badge.className = 'claude-status claude-status-error';
+        badge.textContent = `ERRO: ${tdata.error || 'falha'}`;
+      }
+    } catch (err) {
+      badge.className = 'claude-status claude-status-error';
+      badge.textContent = `ERRO: ${err.message}`;
+    }
+  }
+
+  function setClaudeFeedback(text, kind) {
+    const el = document.getElementById('cfgClaudeFeedback');
+    el.textContent = text;
+    el.className = kind || '';
+  }
+
+  document.getElementById('testClaudeBtn').addEventListener('click', async () => {
+    const keyInput = document.getElementById('cfgClaudeKey').value.trim();
+    setClaudeFeedback('Testando conexão com Claude...', 'info');
+    try {
+      const body = keyInput ? JSON.stringify({ key: keyInput }) : '{}';
+      const res = await fetch('/api/anthropic/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setClaudeFeedback(`✅ Conexão OK — modelo ${data.model} respondeu em ${data.latencyMs}ms`, 'ok');
+      } else {
+        setClaudeFeedback(`❌ ${data.error}`, 'error');
+      }
+    } catch (err) {
+      setClaudeFeedback(`❌ Falha de rede: ${err.message}`, 'error');
+    }
+  });
+
+  document.getElementById('saveClaudeBtn').addEventListener('click', async () => {
+    const keyInput = document.getElementById('cfgClaudeKey').value.trim();
+    if (!keyInput) {
+      setClaudeFeedback('⚠️ Cole a chave no campo antes de salvar', 'error');
+      return;
+    }
+    setClaudeFeedback('Salvando...', 'info');
+    try {
+      const res = await fetch('/api/anthropic/key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: keyInput })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setClaudeFeedback(`✅ Chave salva (${data.masked}). Testando conexão...`, 'ok');
+        document.getElementById('cfgClaudeKey').value = '';
+        await refreshClaudeStatus();
+        updateAIIndicator();
+        logEvent('SYS', 'Chave Claude API configurada');
+      } else {
+        setClaudeFeedback(`❌ ${data.error || 'erro ao salvar'}`, 'error');
+      }
+    } catch (err) {
+      setClaudeFeedback(`❌ Falha de rede: ${err.message}`, 'error');
+    }
+  });
+
+  document.getElementById('clearClaudeBtn').addEventListener('click', async () => {
+    if (!confirm('Remover a chave Claude API? A análise IA deixará de funcionar.')) return;
+    try {
+      const res = await fetch('/api/anthropic/key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: '' })
+      });
+      const data = await res.json();
+      if (data.ok || data.removed) {
+        setClaudeFeedback('🗑 Chave removida', 'info');
+        await refreshClaudeStatus();
+        updateAIIndicator();
+      }
+    } catch (err) {
+      setClaudeFeedback(`❌ ${err.message}`, 'error');
+    }
   });
 
   // Atualiza labels dos ranges em tempo real
@@ -1275,14 +1497,29 @@
             </div>
           </div>
           ${impactBlock}
-          ${ev.released ? `
-            <div class="ai-cta">
-              <button class="ai-btn" data-ai-trigger="${ev.id}">
-                🤖 GERAR ANÁLISE IA
-              </button>
-              <span class="ai-hint">análise institucional completa via Claude</span>
-            </div>
-          ` : ''}
+          ${(() => {
+            const evTime = new Date(ev.datetime).getTime();
+            const now = Date.now();
+            let label, hint;
+            if (evTime > now) {
+              label = '🤖 ANÁLISE DE PREPARAÇÃO';
+              hint = 'cenários, gatilhos e o que monitorar antes do release';
+            } else if (ev.released && ev.actual) {
+              label = '🤖 ANÁLISE COMPLETA';
+              hint = 'leitura institucional definitiva com dados reais';
+            } else {
+              label = '🤖 ANÁLISE PRELIMINAR';
+              hint = 'evento já ocorreu — análise condicional baseada em consenso';
+            }
+            return `
+              <div class="ai-cta">
+                <button class="ai-btn" data-ai-trigger="${ev.id}">
+                  ${label}
+                </button>
+                <span class="ai-hint">${hint}</span>
+              </div>
+            `;
+          })()}
           <div class="ai-slot" data-ai-slot="${ev.id}"></div>
           ${ev.notes ? `<div class="event-notes">${ev.notes}</div>` : ''}
         </div>

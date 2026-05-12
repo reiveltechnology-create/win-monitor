@@ -11,7 +11,8 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
 import { fetchTodayAndTomorrow } from './calendar.js';
-import { generateAnalysis, getCachedAnalysis, clearAnalysisCache } from './analyze.js';
+import { generateAnalysis, getCachedAnalysis, clearAnalysisCache, getMode } from './analyze.js';
+import { getApiKey, getApiKeySource, setApiKey, maskApiKey, testApiKey } from './apiKey.js';
 
 dotenv.config();
 
@@ -222,33 +223,68 @@ app.get('/api/events', (req, res) => {
 
 // Retorna análise em cache (sem chamar Claude) — útil pra restaurar UI ao recarregar
 app.get('/api/analyze/:eventId', (req, res) => {
-  const cached = getCachedAnalysis(req.params.eventId);
+  const ev = findEventById(req.params.eventId);
+  const mode = ev ? getMode(ev) : null;
+  const cached = getCachedAnalysis(req.params.eventId, mode);
   if (cached) {
-    res.json({ analysis: cached, cached: true });
+    res.json({ analysis: cached, cached: true, mode });
   } else {
-    res.json({ analysis: null, cached: false });
+    res.json({ analysis: null, cached: false, mode });
   }
 });
 
-// Gera nova análise (chama Claude API). Body opcional: { force: true } pra ignorar cache
+// Gera nova análise (chama Claude API).
+// O modo é detectado automaticamente:
+//   - pre              → evento futuro (análise de preparação)
+//   - post_preliminary → evento passou mas API ainda sem actual (análise preliminar)
+//   - post_complete    → evento passou e temos actual+forecast (análise definitiva)
 app.post('/api/analyze/:eventId', async (req, res) => {
   const eventId = req.params.eventId;
   const ev = findEventById(eventId);
   if (!ev) {
     return res.status(404).json({ error: 'Evento não encontrado' });
   }
-  if (!ev.released && !ev.actual) {
-    return res.status(400).json({ error: 'Evento ainda não foi liberado (sem dados pra analisar)' });
-  }
+  // Análise é permitida para QUALQUER evento — modo é detectado automaticamente.
 
   if (req.body && req.body.force) {
     clearAnalysisCache(eventId);
   }
 
-  const result = await generateAnalysis(ev, process.env.ANTHROPIC_API_KEY);
+  const apiKey = getApiKey();
+  const result = await generateAnalysis(ev, apiKey);
   if (result.error) {
     return res.status(500).json(result);
   }
+  res.json(result);
+});
+
+// ============ GERENCIAMENTO DA CHAVE DA API ============
+
+// Retorna status atual (sem expor a chave inteira)
+app.get('/api/anthropic/status', (req, res) => {
+  const key = getApiKey();
+  const source = getApiKeySource();
+  res.json({
+    configured: !!key,
+    source,                              // 'file' | 'env' | 'none'
+    masked: key ? maskApiKey(key) : null
+  });
+});
+
+// Salva nova chave
+app.post('/api/anthropic/key', (req, res) => {
+  const newKey = req.body?.key || '';
+  const result = setApiKey(newKey);
+  if (!result.ok) {
+    return res.status(400).json(result);
+  }
+  res.json({ ok: true, source: getApiKeySource(), masked: maskApiKey(getApiKey()) });
+});
+
+// Testa a chave (faz uma chamada mínima na API)
+app.post('/api/anthropic/test', async (req, res) => {
+  const keyToTest = req.body?.key || ''; // opcional — se vazio, testa a salva
+  const result = await testApiKey(keyToTest);
   res.json(result);
 });
 
